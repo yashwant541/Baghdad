@@ -247,7 +247,17 @@ class ReconEngine:
         return out
 
     def _account_rows(self, df):
-        return [{'account':r.account,'account_desc':r.account_desc,'currency':r.tran_ccy,'amount':float(r.adjusted_balance),'bs_mapping':r.bs_mapping} for r in df.itertuples()]
+        # aggregate exactly like make_pivot's pivot_table does — a raw TB
+        # export often carries several lines for the same account (opening
+        # balance + movements, multiple postings, etc.). Leaving them
+        # unaggregated here silently breaks any consumer that dedupes by
+        # (account, currency, bs_mapping) — e.g. the manual match builder,
+        # which must dedupe that way to avoid double-counting when a whole
+        # BS Mapping group and one of its own accounts are both selected —
+        # collapsing distinct postings under a Map key and quietly dropping
+        # all but one of them.
+        g=df.groupby(['account','account_desc','tran_ccy','bs_mapping'],dropna=False)['adjusted_balance'].sum().reset_index()
+        return [{'account':r.account,'account_desc':r.account_desc,'currency':r.tran_ccy,'amount':float(r.adjusted_balance),'bs_mapping':r.bs_mapping} for r in g.itertuples()]
 
     # ---------- Submissions ----------
 
