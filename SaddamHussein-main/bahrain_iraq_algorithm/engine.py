@@ -165,13 +165,22 @@ class ReconEngine:
             headers=[] if header is None else [str(x).strip() if pd.notna(x) else '' for x in raw.iloc[header].tolist()]
             preamble_scale=self._preamble_scale(raw,header)
             filled_headers=forward_fill_headers(headers)
+            # a currency tag alone can't tell two same-currency columns apart
+            # (e.g. "IQD Residents" vs "IQD Non-Residents") — fold in the
+            # next header row too (also forward-filled) as free-text context,
+            # so matching can tell them apart by more than currency + sheet.
+            sub_headers=[]
+            if header is not None and header+1<len(raw):
+                sub_headers=forward_fill_headers([str(x).strip() if pd.notna(x) else '' for x in raw.iloc[header+1].tolist()])
             currency_columns={}
             for j,h in enumerate(filled_headers):
                 code=classify_currency_header(h)
                 if code:
                     scale=detect_scale(h)
                     if scale==1.0: scale=preamble_scale
-                    currency_columns[get_column_letter(j+1)]={'currency':code,'scale':scale}
+                    sub=sub_headers[j] if j<len(sub_headers) else ''
+                    context=h if (not sub or sub==h) else f'{h} | {sub}'
+                    currency_columns[get_column_letter(j+1)]={'currency':code,'scale':scale,'context':context}
             out.append({'sheet':sheet,'rows':int(raw.shape[0]),'columns':int(raw.shape[1]),
                         'header_row':None if header is None else int(header+1),'score':score,
                         'headers':headers[:60],'currency_columns':currency_columns})
@@ -284,13 +293,18 @@ class ReconEngine:
                     headers=[str(x).strip() if pd.notna(x) else '' for x in raw.iloc[hr].tolist()] if hr < len(raw) else []
                     preamble_scale=self._preamble_scale(raw,hr)
                     filled_headers=forward_fill_headers(headers)
+                    sub_headers=[]
+                    if hr+1<len(raw):
+                        sub_headers=forward_fill_headers([str(x).strip() if pd.notna(x) else '' for x in raw.iloc[hr+1].tolist()])
                     info['currency_columns']={}
                     for j,h in enumerate(filled_headers):
                         code=classify_currency_header(h)
                         if code:
                             scale=detect_scale(h)
                             if scale==1.0: scale=preamble_scale
-                            info['currency_columns'][get_column_letter(j+1)]={'currency':code,'scale':scale}
+                            sub=sub_headers[j] if j<len(sub_headers) else ''
+                            context=h if (not sub or sub==h) else f'{h} | {sub}'
+                            info['currency_columns'][get_column_letter(j+1)]={'currency':code,'scale':scale,'context':context}
                 targets.append(info)
         else:
             targets = inspections
@@ -354,15 +368,16 @@ class ReconEngine:
                     colinfo=currency_cols.get(j)
                     if not colinfo:
                         if has_any_currency: continue
-                        ccy,scale='UNSPECIFIED',1.0
+                        ccy,scale,col_ctx='UNSPECIFIED',1.0,''
                     else:
                         ccy,scale=colinfo.get('currency','UNSPECIFIED'),float(colinfo.get('scale',1.0))
+                        col_ctx=colinfo.get('context','')
                     rows.append({
                         'submission_file':file_label,'sheet':sheet_name,'row_number':r+1,
                         'source_cell':f'{get_column_letter(j+1)}{r+1}','label_cell':f'{get_column_letter(label_col+1)}{r+1}',
                         'line_description':label,'hierarchy':hierarchy_path,
                         'hierarchy_path':' / '.join(hierarchy_path) if hierarchy_path else '',
-                        'level':level,'is_total':is_total,'currency':ccy,'scale':scale,
+                        'level':level,'is_total':is_total,'currency':ccy,'scale':scale,'column_context':col_ctx,
                         'raw_amount':amount,'normalized_amount':amount*scale,'unit_multiplier':scale,'sign':1.0
                     })
         return pd.DataFrame(rows)
@@ -633,7 +648,16 @@ class ReconEngine:
         for item in template.get('tb_side',[]) or []:
             acct=str(item.get('account') or '').strip()
             desc=str(item.get('account_desc') or '').strip()
-            bsmap=item.get('bs_mapping'); ccy=item.get('currency')
+            bsmap=item.get('bs_mapping')
+            # 'source_currency' (when present) picks which of an account's
+            # several currency-tagged TB rows to use; 'currency' is the
+            # currency the resulting component is *tagged and compared* as —
+            # these can differ (e.g. a USD-tagged balance that's already
+            # expressed in IQD-equivalent terms, common in a Trial Balance
+            # kept in one reporting currency). Templates that only ever set
+            # 'currency' (the older/simple case) use it for both.
+            filter_ccy=item.get('source_currency') or item.get('currency')
+            tag_ccy=item.get('currency')
             # description is the primary key, not the account number: chart-
             # of-accounts numbers get renumbered/reused across periods or
             # systems far more often than a line's own description changes.
@@ -642,6 +666,8 @@ class ReconEngine:
             cand=tb.iloc[0:0]
             if desc:
                 pool=tb[tb.bs_mapping==bsmap] if bsmap and (tb.bs_mapping==bsmap).any() else tb
+                if filter_ccy and (pool.tran_ccy==filter_ccy).any():
+                    pool=pool[pool.tran_ccy==filter_ccy]
                 scored=sorted(((text_similarity(desc,row.account_desc),idx) for idx,row in pool.iterrows()),
                               key=lambda x:-x[0])
                 if scored and scored[0][0]>=0.55:
@@ -653,25 +679,31 @@ class ReconEngine:
                     cand=tb.loc[[tied[0]]]
             if not len(cand) and acct:
                 hit=tb[tb.account.astype(str).str.strip()==acct]
+                if filter_ccy and (hit.tran_ccy==filter_ccy).any(): hit=hit[hit.tran_ccy==filter_ccy]
                 if len(hit): cand=hit
-            if ccy and len(cand):
-                ccy_hit=cand[cand.tran_ccy==ccy]
-                if len(ccy_hit): cand=ccy_hit
             if not len(cand):
                 warnings.append(f"TB item not found: account={acct or '—'!s} description={desc or '—'!s}")
                 continue
             for _,row in cand.iterrows():
                 tb_components.append({'account':row.account,'account_desc':row.account_desc,'bs_mapping':row.bs_mapping,
-                                       'currency':row.tran_ccy,'amount':float(row.adjusted_balance),'sign':item.get('sign',1)})
+                                       'currency':tag_ccy or row.tran_ccy,'amount':float(row.adjusted_balance),'sign':item.get('sign',1)})
 
         sub_components=[]
         for item in template.get('submission_side',[]) or []:
             text=item.get('match_text') or item.get('line_description') or ''
+            col_ctx=item.get('column_context') or ''
             sheet=item.get('sheet'); ccy=item.get('currency'); want_total=item.get('is_total')
             pool=submissions
             if sheet is not None and len(pool):
                 p2=pool[pool.sheet==sheet]
-                if len(p2): pool=p2
+                if len(p2):
+                    pool=p2
+                elif sheet not in set(pool.sheet.unique()):
+                    # the target sheet wasn't extracted at all this session —
+                    # say so plainly rather than silently hunting a same-named
+                    # line on some other, unrelated sheet.
+                    warnings.append(f"Submission item not found: sheet {sheet!r} was not included in this extraction — {text!r}")
+                    continue
             if ccy and len(pool):
                 p2=pool[pool.currency==ccy]
                 if len(p2): pool=p2
@@ -681,9 +713,16 @@ class ReconEngine:
             if not len(pool):
                 warnings.append(f"Submission item not found (no candidate rows): {text!r}")
                 continue
+            # when several columns share the same currency (e.g. "IQD
+            # Residents" vs "IQD Non-Residents"), the line description alone
+            # can't tell them apart — blend in column-context similarity
+            # whenever the template actually carries one.
             best_idx,best_score=None,0.0
             for idx,row in pool.iterrows():
                 sc=text_similarity(text,row.line_description)
+                if col_ctx:
+                    ctx_sc=text_similarity(col_ctx,row.get('column_context','') or '')
+                    sc=0.5*sc+0.5*ctx_sc
                 if sc>best_score: best_idx,best_score=idx,sc
             if best_idx is None or best_score<0.5:
                 warnings.append(f"Submission item low-confidence match, please review: {text!r} (best match score {best_score:.2f})")
@@ -717,7 +756,15 @@ class ReconEngine:
         resolved={'bs_mapping':template.get('label') or 'Imported match','label':template.get('label'),
                   'currency':template.get('currency','TOTAL'),'rule_type':template.get('rule_type','MANUAL_CLUB'),
                   'source':'IMPORTED','tb_components':tb_components,'components':sub_components}
-        return resolved, warnings
+        # the same missing account can surface once per currency-tagged row
+        # it was expected under (e.g. a "Non-Residents" bucket combining one
+        # account across five FX currencies) — de-dupe so the report reads
+        # as "what's actually missing", not "how many times was it missing".
+        seen=set(); deduped=[]
+        for w in warnings:
+            if w in seen: continue
+            seen.add(w); deduped.append(w)
+        return resolved, deduped
 
     # ---------- Lineage ----------
 
@@ -772,6 +819,23 @@ class ReconEngine:
                     if isinstance(c.value,(int,float)): c.number_format='#,##0.00;[Red](#,##0.00);-'
         wb.save(path); return path
 
+    def load_default_mapping(self):
+        """A bundled, portable mapping (see resolve_rule_template) shipped
+        alongside the engine so a known chart of accounts reconciles by
+        default without anyone having to upload it each session. Purely
+        name/description driven — never a cell address — so it's safe to
+        reuse across periods and even across files that reshuffle layout.
+        Returns [] if no default_mapping.json is bundled (e.g. a fresh
+        deployment that hasn't been given one yet)."""
+        path=os.path.join(os.path.dirname(os.path.abspath(__file__)),'default_mapping.json')
+        if not os.path.isfile(path): return []
+        try:
+            with open(path,encoding='utf-8') as f:
+                data=json.load(f)
+            return data.get('matches',[]) or []
+        except Exception:
+            return []
+
     def export_submissions(self, submissions, path=None):
         """A clean, simplified workbook of what was actually extracted from
         the submission sheets — the raw tagged lines plus a currency pivot —
@@ -791,16 +855,28 @@ class ReconEngine:
                 pivot.to_excel(w,sheet_name='Summary by Currency',index=False)
         return self._style_workbook(path)
 
-    def export(self, tb, pivot, submissions=None, recon=None, suggestions=None, lineage=None, path=None):
+    def export(self, tb, pivot, submissions=None, recon=None, suggestions=None, lineage=None, path=None, mapping_coverage=None):
         path=path or tempfile.mktemp(suffix='.xlsx')
         with pd.ExcelWriter(path,engine='openpyxl') as w:
-            summary=pd.DataFrame([{'Metric':'TB rows','Value':len(tb)},{'Metric':'TB adjusted balance','Value':tb.adjusted_balance.sum()},
-                                   {'Metric':'BS Mapping groups','Value':tb.bs_mapping.nunique()},
-                                   {'Metric':'Submission extracted lines','Value':0 if submissions is None else len(submissions)},
-                                   {'Metric':'Reconciliation rules','Value':0 if recon is None else len(recon)}])
+            summary_rows=[{'Metric':'TB rows','Value':len(tb)},{'Metric':'TB adjusted balance','Value':tb.adjusted_balance.sum()},
+                          {'Metric':'BS Mapping groups','Value':tb.bs_mapping.nunique()},
+                          {'Metric':'Submission extracted lines','Value':0 if submissions is None else len(submissions)},
+                          {'Metric':'Reconciliation rules','Value':0 if recon is None else len(recon)}]
+            if mapping_coverage:
+                summary_rows += [
+                    {'Metric':'Default mapping rules attempted','Value':len(mapping_coverage)},
+                    {'Metric':'Default mapping rules fulfilled (data found both sides)','Value':sum(1 for e in mapping_coverage if e.get('fulfilled'))},
+                    {'Metric':'Default mapping rules reconciled (MATCH/MATCH_WITHIN_TOLERANCE)','Value':sum(1 for e in mapping_coverage if e.get('reconciled_status') in ('MATCH','MATCH_WITHIN_TOLERANCE'))},
+                    {'Metric':'Default mapping rules unresolved (no data found)','Value':sum(1 for e in mapping_coverage if not e.get('fulfilled'))},
+                ]
+            summary=pd.DataFrame(summary_rows)
             summary.to_excel(w,sheet_name='01 Executive Summary',index=False); pivot.to_excel(w,sheet_name='02 TB Pivot',index=False); tb.to_excel(w,sheet_name='03 TB Account Detail',index=False)
             if submissions is not None and len(submissions): submissions.drop(columns=['hierarchy'],errors='ignore').to_excel(w,sheet_name='04 Submission Inventory',index=False)
             if recon is not None and len(recon): recon.to_excel(w,sheet_name='05 Recon Results',index=False)
             if suggestions: pd.DataFrame(suggestions).drop(columns=['components','match_basis'],errors='ignore').to_excel(w,sheet_name='06 Auto Suggestions',index=False)
             if lineage is not None and len(lineage): lineage.drop(columns=['evidence','tb_evidence'],errors='ignore').to_excel(w,sheet_name='07 Reconciliation Map',index=False)
+            if mapping_coverage:
+                cov=pd.DataFrame(mapping_coverage)
+                if 'warnings' in cov.columns: cov['warnings']=cov['warnings'].apply(lambda w: '; '.join(w) if isinstance(w,list) else w)
+                cov.to_excel(w,sheet_name='08 Mapping Coverage',index=False)
         return self._style_workbook(path)

@@ -6,7 +6,8 @@
 let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbItems:[],tbSel:new Set(),
   tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
   subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),
-  suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[]};
+  suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[],
+  mappingCoverage:[],mappingCoverageSummary:null,coverageFilter:'all'};
 
 const $=id=>document.getElementById(id);
 
@@ -193,14 +194,26 @@ async function extractSubs(){
     const key=s.bs_mapping+'|'+s.currency;
     state.suggestionDecisions[i]=(bestForKey[key]===i)&&s.confidence>=0.6;
   });
-  $('subExtractMessage').innerHTML=`<div class="notice good">Extracted <b>${j.count}</b> currency-tagged lines. Generated <b>${state.suggestions.length}</b> candidate matches.</div>`;
+  // the bundled default mapping (see load_default_mapping) is resolved
+  // server-side against this TB + these submissions automatically — pull
+  // whatever it found straight into Manual matches, same as a manually
+  // uploaded mapping, just without the upload step. Still fully reviewable
+  // (and removable) before you ever run the reconciliation.
+  const defaultMatches=j.default_mapping_matches||[];
+  defaultMatches.forEach(r=>state.manualMatches.push({...r.resolved,warnings:r.warnings||[]}));
+  state.mappingCoverage=j.mapping_coverage||[];
+  state.mappingCoverageSummary=j.mapping_coverage_summary||null;
+  const defaultNote=defaultMatches.length
+    ? ` Included <b>${defaultMatches.length}</b> match${defaultMatches.length!==1?'es':''} from the default mapping automatically (review under Manual matches — see Mapping Coverage for the full picture: ${state.mappingCoverageSummary?state.mappingCoverageSummary.fulfilled+' of '+state.mappingCoverageSummary.total+' rules fulfilled':''}).`
+    : '';
+  $('subExtractMessage').innerHTML=`<div class="notice good">Extracted <b>${j.count}</b> currency-tagged lines. Generated <b>${state.suggestions.length}</b> candidate matches.${defaultNote}</div>`;
   $('subDownloadRow').style.display=state.subPreview.length?'flex':'none';
   table('subTable',state.subPreview,[
     {key:'submission_file',label:'File'},{key:'sheet',label:'Sheet'},{key:'source_cell',label:'Cell'},
     {key:'hierarchy_path',label:'Section'},{key:'line_description',label:'Line description'},
     {key:'currency',label:'Currency'},{key:'is_total',label:'Total row?',render:v=>v?'<span class="pill MATCH">TOTAL</span>':''},
     {key:'normalized_amount',label:'Amount'}]);
-  renderSuggestions(); renderSubPicker(); renderTbPicker();
+  renderSuggestions(); renderSubPicker(); renderTbPicker(); renderManualMatches(); renderCoverage();
   setStatus('Submissions extracted'); go('mapping');
 }
 function downloadSubmissions(){
@@ -489,6 +502,46 @@ async function applyMapping(){
   $('mappingFile').value='';
 }
 
+/* ---------------- Mapping Coverage ---------------- */
+
+function renderCoverage(){
+  const box=$('coverageSummary'); if(!box) return;
+  const cov=state.mappingCoverage||[];
+  const s=state.mappingCoverageSummary;
+  const reconciled=cov.filter(e=>e.reconciled_status==='MATCH'||e.reconciled_status==='MATCH_WITHIN_TOLERANCE').length;
+  const needsReview=cov.filter(e=>e.reconciled_status==='REVIEW_REQUIRED'||e.reconciled_status==='UNRESOLVED').length;
+  const notApproved=cov.filter(e=>e.reconciled_status==='NOT_APPROVED').length;
+  box.innerHTML=[
+    ['Total rules',s?s.total:cov.length],
+    ['Fulfilled (data found)',s?s.fulfilled:cov.filter(e=>e.fulfilled).length],
+    ['Unresolved (no data)',s?s.unresolved:cov.filter(e=>!e.fulfilled).length],
+    ['Reconciled (matched)',reconciled],
+    ['Needs review',needsReview],
+  ].map(([k,v])=>`<div class="kpi"><small>${esc(k)}</small><b>${esc(v)}</b></div>`).join('');
+  renderCoverageTable();
+}
+function renderCoverageTable(){
+  const t=$('coverageTable'); if(!t) return;
+  const q=($('coverageSearch')?.value||'').toLowerCase();
+  const f=state.coverageFilter||'all';
+  let rows=state.mappingCoverage||[];
+  if(f==='fulfilled') rows=rows.filter(e=>e.fulfilled);
+  else if(f==='unresolved') rows=rows.filter(e=>!e.fulfilled);
+  else if(f==='reconciled') rows=rows.filter(e=>e.reconciled_status==='MATCH'||e.reconciled_status==='MATCH_WITHIN_TOLERANCE');
+  else if(f==='review') rows=rows.filter(e=>e.reconciled_status==='REVIEW_REQUIRED'||e.reconciled_status==='UNRESOLVED');
+  if(q) rows=rows.filter(e=>JSON.stringify(e).toLowerCase().includes(q));
+  table('coverageTable',rows,[
+    {key:'label',label:'Mapping rule'},
+    {key:'currency',label:'Currency'},
+    {key:'fulfilled',label:'Data found?',render:v=>v?'<span class="pill MATCH">FULFILLED</span>':'<span class="pill REVIEW_REQUIRED">NOT FOUND</span>'},
+    {key:'tb_accounts',label:'TB accounts'},
+    {key:'sub_lines',label:'Submission lines'},
+    {key:'reconciled_status',label:'Reconciliation outcome',render:v=>v?`<span class="pill ${v==='NOT_APPROVED'?'NO_RULE':v}">${esc(v)}</span>`:'<span class="muted">not run</span>'},
+    {key:'tb_amount',label:'TB Amount'},{key:'submission_amount',label:'Submission Amount'},{key:'difference',label:'Difference'},
+    {key:'warnings',label:'Detail',render:v=>(v&&v.length)?esc(v.join(' · ')):''}
+  ]);
+}
+
 async function runRecon(){
   const approved=state.suggestions.filter((_,i)=>state.suggestionDecisions[i]).map(s=>({bs_mapping:s.bs_mapping,currency:s.currency,rule_type:s.rule_type,source:'AUTO',components:s.components}));
   const manual=state.manualMatches.map(m=>({bs_mapping:m.label||m.bs_mapping,currency:m.currency,rule_type:m.rule_type,source:m.source||'MANUAL',tb_components:m.tb_components,components:m.components}));
@@ -497,6 +550,8 @@ async function runRecon(){
   const j=await api('/api/reconcile',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({session_id:state.session,rules,tolerance_abs:+$('tolAbs').value,tolerance_pct:+$('tolPct').value})});
   state.results=j.results||[]; state.lineage=j.lineage||[];
+  if(j.mapping_coverage) state.mappingCoverage=j.mapping_coverage;
+  renderCoverage();
   let counts={}; state.results.forEach(x=>counts[x.status]=(counts[x.status]||0)+1);
   $('resultSummary').innerHTML=Object.entries(counts).map(([k,v])=>`<div class="kpi"><small>${esc(k)}</small><b>${esc(v)}</b></div>`).join('');
   table('resultTable',state.results,[
@@ -600,6 +655,11 @@ const CLICK_ACTIONS={
   'apply-mapping':(el)=>guarded(el,applyMapping),
   'run-recon':(el)=>guarded(el,runRecon),
   'download':()=>downloadOutput(),
+  'coverage-filter':(el)=>{
+    state.coverageFilter=el.dataset.filter;
+    document.querySelectorAll('[data-action="coverage-filter"]').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.coverageFilter));
+    renderCoverageTable();
+  },
 };
 
 document.addEventListener('click',e=>{
@@ -641,6 +701,7 @@ document.addEventListener('input',e=>{
   if(e.target.id==='pivotSearch') renderPivot();
   if(e.target.id==='tbPickerSearch') renderTbPicker();
   if(e.target.id==='subPickerSearch') renderSubPicker();
+  if(e.target.id==='coverageSearch') renderCoverageTable();
 });
 
 init();

@@ -91,10 +91,41 @@ def submissions_extract():
     import pandas as pd
     d['sub_df']=pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
     d['suggestions']=eng.auto_match(d['tb_tree'] or [], d['sub_df']) if d['tb_tree'] is not None else []
+
+    # a bundled, name/description-driven mapping (never cell addresses) is
+    # resolved automatically here too, so a known chart of accounts is part
+    # of reconciliation by default — no manual upload needed. Every attempted
+    # rule is recorded (fulfilled or not, and why) so coverage is fully
+    # visible rather than collapsed into a single skipped-count.
+    default_matches=[]; coverage=[]
+    if d['tb'] is not None and len(d['sub_df']):
+        templates=eng.load_default_mapping()
+        for tpl in templates:
+            resolved,warnings=eng.resolve_rule_template(tpl,d['tb'],d['sub_df'])
+            tb_n=len(resolved.get('tb_components') or []); sub_n=len(resolved.get('components') or [])
+            fulfilled=tb_n>0 and sub_n>0
+            entry={'label':resolved.get('label'),'currency':resolved.get('currency'),'rule_type':resolved.get('rule_type'),
+                   'fulfilled':fulfilled,'tb_found':tb_n>0,'sub_found':sub_n>0,
+                   'tb_accounts':tb_n,'sub_lines':sub_n,'warnings':warnings,'reconciled_status':None}
+            if fulfilled:
+                resolved['source']='DEFAULT'
+                default_matches.append({'resolved':resolved,'warnings':warnings})
+                entry['tb_amount']=sum(c['amount']*c.get('sign',1) for c in resolved['tb_components'])
+                entry['submission_amount']=sum(c['amount']*c.get('sign',1)*c.get('multiplier',1) for c in resolved['components'])
+                entry['difference']=entry['tb_amount']-entry['submission_amount']
+            coverage.append(entry)
+    d['mapping_coverage']=coverage
+
     preview=d['sub_df'].copy()
     if 'hierarchy' in preview.columns: preview=preview.drop(columns=['hierarchy'])
+    summary={'total':len(coverage),'fulfilled':sum(1 for e in coverage if e['fulfilled']),
+             'unresolved':sum(1 for e in coverage if not e['fulfilled']),
+             'tb_only':sum(1 for e in coverage if e['tb_found'] and not e['sub_found']),
+             'sub_only':sum(1 for e in coverage if e['sub_found'] and not e['tb_found']),
+             'neither':sum(1 for e in coverage if not e['tb_found'] and not e['sub_found'])}
     return jsonify({'ok':True,'count':len(d['sub_df']),'preview':json.loads(preview.head(400).to_json(orient='records')),
-                    'suggestions':d['suggestions']})
+                    'suggestions':d['suggestions'],'default_mapping_matches':default_matches,
+                    'mapping_coverage':coverage,'mapping_coverage_summary':summary})
 
 @app.route('/api/submissions/export',methods=['GET'])
 def submissions_export():
@@ -131,7 +162,22 @@ def reconcile():
     recon_rows=json.loads(d['recon'].to_json(orient='records'))
     lineage=eng.build_lineage(d['tb_tree'] or [], recon_rows)
     d['lineage']=lineage
-    return jsonify({'ok':True,'results':recon_rows,'lineage':lineage})
+
+    # fold the actual reconciliation outcome back into the mapping coverage
+    # report, so "fulfilled" (data was found) and "reconciled" (it was
+    # approved AND the numbers actually matched) are visibly two different
+    # questions with two different answers.
+    if d.get('mapping_coverage'):
+        by_key={(r['bs_mapping'],r['currency']):r for r in recon_rows}
+        for entry in d['mapping_coverage']:
+            r=by_key.get((entry['label'],entry['currency']))
+            if r:
+                entry['reconciled_status']=r['status']
+                entry['tb_amount']=r['tb_amount']; entry['submission_amount']=r['submission_amount']; entry['difference']=r['difference']
+            elif entry['fulfilled']:
+                entry['reconciled_status']='NOT_APPROVED'
+
+    return jsonify({'ok':True,'results':recon_rows,'lineage':lineage,'mapping_coverage':d.get('mapping_coverage',[])})
 
 @app.route('/api/lineage',methods=['GET'])
 def lineage():
@@ -146,5 +192,5 @@ def download():
     eng=ReconEngine()
     flat_lineage=eng.flatten_lineage(d['lineage']) if d.get('lineage') else None
     path=os.path.join(d['dir'],'Bahrain_Iraq_Reconciliation_Output.xlsx')
-    eng.export(d['tb'],d['pivot'],d['sub_df'],d['recon'],d.get('suggestions'),flat_lineage,path)
+    eng.export(d['tb'],d['pivot'],d['sub_df'],d['recon'],d.get('suggestions'),flat_lineage,path,mapping_coverage=d.get('mapping_coverage'))
     return send_file(path,as_attachment=True,download_name='Bahrain_Iraq_Reconciliation_Output.xlsx')

@@ -7,6 +7,7 @@
     <div class="step" data-page="pivot"><span class="stepIcon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 9v12"/></svg></span><span class="stepLabel">TB Pivot</span></div>
     <div class="step" data-page="subs"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 14v6h16v-6"/><path d="M12 3v11M7 9l5-5 5 5"/></svg></span><span class="stepLabel">Submissions</span></div>
     <div class="step" data-page="mapping"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle class="dotc" cx="6" cy="6" r="2.2"/><circle class="dotc" cx="6" cy="18" r="2.2"/><circle class="dotc" cx="18" cy="12" r="2.2"/><path d="M8 7l8 4M8 17l8-4"/></svg></span><span class="stepLabel">Mapping Studio</span></div>
+    <div class="step" data-page="coverage"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M6 2h12v20H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></span><span class="stepLabel">Mapping Coverage</span></div>
     <div class="step" data-page="results"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><path d="m8 12.5 2.6 2.6L16 9.6"/></svg></span><span class="stepLabel">Recon Results</span></div>
     <div class="step" data-page="map"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle class="dotc" cx="5" cy="6" r="2"/><circle class="dotc" cx="5" cy="18" r="2"/><circle class="dotc" cx="19" cy="12" r="2"/><path d="M7 6h6a4 4 0 0 1 4 4M7 18h6a4 4 0 0 0 4-4"/></svg></span><span class="stepLabel">Reconciliation Map</span></div>
     <div class="step" data-page="export"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M4 19h16"/></svg></span><span class="stepLabel">Export</span></div>
@@ -119,6 +120,21 @@
 <div id="mappingImportMessage"></div>
 
 <div class="actions"><label>Absolute tolerance <input id="tolAbs" type="number" value="1" step="0.01"></label><label>Percentage tolerance <input id="tolPct" type="number" value="0.0001" step="0.0001"></label><button type="button" class="primary" id="btnRunRecon" data-action="run-recon">Run reconciliation <svg viewBox="0 0 24 24" class="btnIcon"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div>
+</section>
+
+<section id="coverage" class="page">
+<div class="title"><div><h2>Mapping Coverage</h2><p>Of every mapping rule the app knows about (the bundled default mapping, plus anything you've imported), how many actually found a match — and how many didn't, and why.</p></div><button type="button" class="secondary" data-action="download">Export workbook</button></div>
+<div id="coverageSummary" class="kpis"></div>
+<div class="title" style="margin-top:26px"><div><h3 style="margin:0">Every rule, in detail</h3><p>Fulfilled = data was found on both sides. Reconciled = it was also approved and run, and the numbers agreed.</p></div></div>
+<div class="pickerBulk" style="margin-bottom:10px">
+  <button type="button" class="linkBtn active" data-action="coverage-filter" data-filter="all">All</button>
+  <button type="button" class="linkBtn" data-action="coverage-filter" data-filter="fulfilled">Fulfilled only</button>
+  <button type="button" class="linkBtn" data-action="coverage-filter" data-filter="unresolved">Unresolved only</button>
+  <button type="button" class="linkBtn" data-action="coverage-filter" data-filter="reconciled">Reconciled only</button>
+  <button type="button" class="linkBtn" data-action="coverage-filter" data-filter="review">Needs review only</button>
+</div>
+<input class="search" id="coverageSearch" placeholder="Search label, currency or warning text">
+<div class="tableWrap"><table id="coverageTable"></table></div>
 </section>
 
 <section id="results" class="page">
