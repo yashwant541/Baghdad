@@ -60,19 +60,57 @@
 <div id="sheetPicker"></div>
 <div class="actions" id="extractActions" style="display:none"><button type="button" class="primary" id="btnExtractSubs" data-action="extract-subs">Extract selected sheets <svg viewBox="0 0 24 24" class="btnIcon"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div>
 <div id="subExtractMessage"></div>
+<div class="title" id="subDownloadRow" style="display:none;margin-top:6px"><div><h3 style="margin:0">Extracted lines</h3><p>The cleaned, currency-tagged lines read from your selected sheets</p></div><button type="button" class="secondary" data-action="download-submissions">Download submissions file</button></div>
 <div class="tableWrap"><table id="subTable"></table></div>
 </section>
 
 <section id="mapping" class="page">
-<div class="title"><div><h2>Mapping Studio</h2><p>Review the engine's suggested matches, then add manual rules for anything it couldn't resolve.</p></div><button type="button" class="secondary" data-action="add-rule">+ Manual rule</button></div>
+<div class="title"><div><h2>Mapping Studio</h2><p>Review the engine's suggested matches, then build or import manual matches for anything it couldn't resolve.</p></div></div>
 
-<div class="notice">Nothing is reconciled automatically. Every suggestion below must be explicitly approved; unapproved suggestions are ignored when you run the reconciliation.</div>
+<div class="notice">Nothing is reconciled automatically. Every suggestion and manual match below is explicit and reviewable; nothing runs until you press Run reconciliation.</div>
 <div id="suggestionSummary" class="kpis"></div>
 <div id="suggestions"></div>
 
-<h3 class="subhead">Manual rules</h3>
-<div class="notice">Use this for anything the auto-matcher missed or matched incorrectly.</div>
-<div id="rules"></div>
+<h3 class="subhead">Build a manual match</h3>
+<div class="notice">Pick any combination of Trial Balance items on the left and submission lines on the right — a single item, several accounts clubbed together, or a whole group against a whole sub‑total. As long as the clubbed values are financially logical, the engine will sum each side and compare them.</div>
+<div class="matchBuilder">
+  <div class="pickerCol">
+    <div class="pickerHead"><b>Trial Balance items</b><span class="muted" id="tbPickerCount">0 selected</span></div>
+    <input class="search" id="tbPickerSearch" placeholder="Search account, description or BS mapping">
+    <div class="pickerList" id="tbPickerList"></div>
+    <div class="pickerFoot">Selected total <b id="tbPickerSum">0</b></div>
+  </div>
+  <div class="pickerCol">
+    <div class="pickerHead"><b>Submission items</b><span class="muted" id="subPickerCount">0 selected</span></div>
+    <input class="search" id="subPickerSearch" placeholder="Search file, sheet or line description">
+    <div class="pickerList" id="subPickerList"></div>
+    <div class="pickerFoot">Selected total <b id="subPickerSum">0</b></div>
+  </div>
+</div>
+<div class="actions" style="justify-content:space-between">
+  <label style="flex:1">Match description <input id="matchLabel" placeholder="e.g. Cash &amp; balances (Assets) vs submission cash lines" style="width:100%"></label>
+  <button type="button" class="primary" id="btnAddMatch" data-action="add-manual-match">Add manual match <svg viewBox="0 0 24 24" class="btnIcon"><path d="M12 5v14M5 12h14"/></svg></button>
+</div>
+
+<h3 class="subhead">Manual matches</h3>
+<div id="manualMatches"></div>
+
+<div class="mappingIO">
+  <div>
+    <b>Save your mapping</b>
+    <p class="muted">Download everything you've built above as a portable mapping file — re‑upload it against a future period's Trial Balance and submissions to get the same matches re‑resolved automatically.</p>
+    <button type="button" class="secondary" data-action="download-mapping">Download mapping file</button>
+  </div>
+  <div>
+    <b>Load a saved mapping</b>
+    <p class="muted">Upload a mapping file saved earlier. Each match is re‑resolved against the current data and added below for review — nothing is applied silently.</p>
+    <input id="mappingFile" type="file" accept=".json" style="display:none">
+    <button type="button" class="secondary" data-action="choose-mapping">Choose mapping file</button>
+    <button type="button" class="primary" id="btnApplyMapping" data-action="apply-mapping">Apply mapping</button>
+  </div>
+</div>
+<div id="mappingImportMessage"></div>
+
 <div class="actions"><label>Absolute tolerance <input id="tolAbs" type="number" value="1" step="0.01"></label><label>Percentage tolerance <input id="tolPct" type="number" value="0.0001" step="0.0001"></label><button type="button" class="primary" id="btnRunRecon" data-action="run-recon">Run reconciliation <svg viewBox="0 0 24 24" class="btnIcon"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div>
 </section>
 

@@ -266,6 +266,29 @@ class ReconEngine:
 
     # ---------- Auto-matching ----------
 
+    def find_submission_subset(self, items, target, tolerance_abs, tolerance_pct, max_combo=4, max_items=10):
+        """Bounded subset-sum: which specific submission lines (out of a
+        already section-matched pool) actually club up to a TB figure, when
+        blindly summing every line in the pool doesn't reconcile and there's
+        no sheet-provided Total row to trust instead. Deliberately narrow in
+        scope — only ever called on items already confined to one matched TB
+        group/sub-group and one matched submission section — so a numeric
+        coincidence across unrelated parts of the file can't be suggested."""
+        n=len(items)
+        if n==0 or n>max_items: return None
+        tol=max(tolerance_abs, abs(target)*tolerance_pct)
+        best=None
+        for size in range(1, min(max_combo,n)+1):
+            for combo in itertools.combinations(range(n), size):
+                s=sum(items[i]['normalized_amount'] for i in combo)
+                diff=abs(target-s)
+                if diff<=tol:
+                    coverage=size/n
+                    rank=(diff,-coverage)
+                    if best is None or rank<best[0]:
+                        best=(rank,combo)
+        return best[1] if best else None
+
     def auto_match(self, tb_tree, submission_df, min_group_score=0.35, min_sub_score=0.3):
         if submission_df is None or submission_df.empty: return []
         recs=submission_df.to_dict('records')
@@ -285,18 +308,50 @@ class ReconEngine:
             if best_score < min_group_score or best_top is None: continue
             top_rows=sub_top[best_top]
             children = group.get('children') or [{'name':'(Direct)','level':'subgroup','currency_totals':group.get('currency_totals',{}),'accounts':group.get('accounts',[])}]
+
+            # Partition every submission line under this section across the
+            # group's sub-groups by best name fit, so a flat list of lines
+            # with no bold sub-headers and no "Total X" rows (a very common
+            # "imperfect" layout) still lands every relevant sibling line in
+            # the same pool — not just whichever single line happens to score
+            # highest. A dedicated "Total <sub-group>" row is authoritative
+            # for that sub-group specifically and wins its pool outright.
+            if len(children)==1 and children[0]['name']=='(Direct)':
+                child_pools={'(Direct)':top_rows}
+                child_match_score={'(Direct)':best_score}
+                child_match_label={'(Direct)':best_top}
+            else:
+                child_pools={c['name']:[] for c in children}
+                child_match_score={c['name']:0.0 for c in children}
+                child_match_label={c['name']:None for c in children}
+                for r in top_rows:
+                    # a grand-total row for the WHOLE section ("TOTAL ASSETS")
+                    # must never be claimed by one sub-group's pool — short,
+                    # generic labels like that can otherwise out-score a real
+                    # sub-group name on pure character similarity and silently
+                    # double-count the section total inside one sub-group.
+                    if r['is_total'] and (text_similarity(strip_total_prefix(r['line_description']),gname)>=0.6
+                                           or text_similarity(strip_total_prefix(r['line_description']),best_top)>=0.6):
+                        continue
+                    hier=r.get('hierarchy') or []
+                    candidate_label = hier[1] if len(hier)>1 else strip_total_prefix(r['line_description'])
+                    best_child,best_child_score=None,0.0
+                    for c in children:
+                        if c['name']=='(Direct)': continue
+                        score=text_similarity(c['name'],candidate_label)
+                        if score>best_child_score: best_child,best_child_score=c['name'],score
+                    if best_child is not None and best_child_score>=min_sub_score:
+                        child_pools[best_child].append(r)
+                        if best_child_score>child_match_score[best_child]:
+                            child_match_score[best_child]=best_child_score
+                            child_match_label[best_child]=candidate_label
+
             for child in children:
                 cname=child['name']
-                sub_candidates=defaultdict(list)
-                for r in top_rows:
-                    hier=r.get('hierarchy') or []
-                    key = hier[1] if len(hier)>1 else strip_total_prefix(r['line_description'])
-                    sub_candidates[key].append(r)
-                best_sub,best_sub_score=None,0.0
-                for key in sub_candidates:
-                    score=text_similarity(cname,key)
-                    if score>best_sub_score: best_sub,best_sub_score=key,score
-                pool = sub_candidates.get(best_sub, top_rows) if (best_sub_score>=min_sub_score and cname!='(Direct)') else top_rows
+                pool=child_pools.get(cname) or []
+                if not pool: continue
+                best_sub=child_match_label.get(cname)
+                best_sub_score=child_match_score.get(cname,0.0)
                 for ccy, tb_amt in (child.get('currency_totals') or {}).items():
                     if ccy=='TOTAL':
                         matches=[r for r in pool if r['currency']=='TOTAL' or str(r['currency']).startswith('TOTAL_')]
@@ -321,6 +376,31 @@ class ReconEngine:
                                        'source_cell':r['source_cell'],'line_description':r['line_description'],'currency':r['currency'],
                                        'amount':r['normalized_amount'],'multiplier':1,'sign':resolved_sign} for r in chosen]
                     })
+
+                    # the blanket "sum every line in this section" suggestion above
+                    # didn't reconcile and there was no Total row to fall back on —
+                    # try to find which specific lines actually club up to the TB
+                    # figure (e.g. one stray unrelated line in the same section is
+                    # often the entire reason the blanket sum was off).
+                    out_of_tolerance = abs(diff) > max(self.tolerance_abs, abs(tb_amt)*self.tolerance_pct)
+                    if ccy!='TOTAL' and not totals and out_of_tolerance and len(matches)>1:
+                        combo_idx=self.find_submission_subset(matches, tb_amt*resolved_sign, self.tolerance_abs, self.tolerance_pct)
+                        if combo_idx and len(combo_idx)<len(matches):
+                            chosen2=[matches[i] for i in combo_idx]
+                            sub_amt2=sum(r['normalized_amount'] for r in chosen2)*resolved_sign
+                            diff2=tb_amt-sub_amt2
+                            suggestions.append({
+                                'bs_mapping':label,'group':gname,'subgroup':None if cname=='(Direct)' else cname,
+                                'currency':ccy,'tb_amount':tb_amt,'suggested_submission_amount':sub_amt2,'difference':diff2,
+                                'sign_applied':resolved_sign,
+                                'confidence':round(min(best_score,best_sub_score if best_sub_score else best_score)*0.9,2),
+                                'match_basis':{'section_match':best_top,'subgroup_match':best_sub,'used_total_rows':False,
+                                                'auto_clubbed':True,'excluded_lines':len(matches)-len(chosen2)},
+                                'rule_type':'AUTO_CLUB_SUBSET',
+                                'components':[{'submission_file':r['submission_file'],'sheet':r['sheet'],'row_number':r['row_number'],
+                                               'source_cell':r['source_cell'],'line_description':r['line_description'],'currency':r['currency'],
+                                               'amount':r['normalized_amount'],'multiplier':1,'sign':resolved_sign} for r in chosen2]
+                            })
         suggestions.sort(key=lambda s: (-s['confidence'], s['bs_mapping']))
         return suggestions
 
@@ -335,7 +415,8 @@ class ReconEngine:
         grp_hier_ccy=tb.groupby(['_hier_key','tran_ccy'])['adjusted_balance'].sum().to_dict()
         out=[]
         for rule in rules:
-            bs=rule.get('bs_mapping','').strip(); ccy=rule.get('currency','TOTAL') or 'TOTAL'
+            bs=(rule.get('bs_mapping') or rule.get('label') or '').strip()
+            ccy=rule.get('currency','TOTAL') or 'TOTAL'
             comps=rule.get('components',[]); sub_amt=0.0; evidence=[]
             for comp in comps:
                 f,s,row=comp.get('submission_file'),comp.get('sheet'),comp.get('row_number')
@@ -350,16 +431,116 @@ class ReconEngine:
                     amount=float(r0.normalized_amount)*float(comp.get('multiplier',1))*float(comp.get('sign',1))
                     sub_amt+=amount
                     evidence.append({'file':f,'sheet':s,'row':int(row),'description':r0.line_description,'amount':amount,'currency':str(r0.get('currency',''))})
-            if ccy=='TOTAL':
-                tb_amt=float(grp_raw_total.get(bs, grp_hier_total.get(bs,0)))
+
+            # the TB side of a rule is normally a single BS-Mapping group/currency
+            # looked up from the Trial Balance totals (auto-suggestions work this
+            # way). A manually built or imported match instead names its own list
+            # of clubbed-up TB accounts/groups with real amounts already attached
+            # (see build_tb_components / resolve_rule_template) — sum those directly
+            # and keep the same per-item evidence trail the submission side has.
+            tb_components=rule.get('tb_components')
+            if tb_components:
+                tb_amt=0.0; tb_evidence=[]
+                for c in tb_components:
+                    amt=float(c.get('amount',0))*float(c.get('sign',1))
+                    tb_amt+=amt
+                    tb_evidence.append({'account':c.get('account'),'description':c.get('account_desc'),
+                                         'bs_mapping':c.get('bs_mapping'),'currency':c.get('currency'),'amount':amt})
             else:
-                tb_amt=float(grp_raw_ccy.get((bs,ccy), grp_hier_ccy.get((bs,ccy),0)))
-            diff=tb_amt-sub_amt; pct=abs(diff)/max(abs(tb_amt),1)
-            status='MATCH' if abs(diff)<1e-9 else 'MATCH_WITHIN_TOLERANCE' if abs(diff)<=self.tolerance_abs or pct<=self.tolerance_pct else 'REVIEW_REQUIRED'
+                tb_evidence=None
+                if ccy=='TOTAL':
+                    tb_amt=float(grp_raw_total.get(bs, grp_hier_total.get(bs,0)))
+                else:
+                    tb_amt=float(grp_raw_ccy.get((bs,ccy), grp_hier_ccy.get((bs,ccy),0)))
+
+            # a manually built / imported rule that resolved to nothing on
+            # BOTH sides would otherwise report a trivial 0 vs 0 "MATCH" —
+            # actively misleading in an audit tool, so call it out instead.
+            if tb_components is not None and not tb_components and not evidence:
+                status='UNRESOLVED'; diff=None; pct=None
+            else:
+                diff=tb_amt-sub_amt; pct=abs(diff)/max(abs(tb_amt),1)
+                status='MATCH' if abs(diff)<1e-9 else 'MATCH_WITHIN_TOLERANCE' if abs(diff)<=self.tolerance_abs or pct<=self.tolerance_pct else 'REVIEW_REQUIRED'
             out.append({'bs_mapping':bs,'currency':ccy,'tb_amount':tb_amt,'submission_amount':sub_amt,'difference':diff,
                         'variance_pct':pct,'status':status,'rule_type':rule.get('rule_type','DIRECT'),
-                        'source':rule.get('source','MANUAL'),'evidence':json.dumps(evidence,ensure_ascii=False)})
+                        'source':rule.get('source','MANUAL'),'evidence':json.dumps(evidence,ensure_ascii=False),
+                        'tb_evidence':json.dumps(tb_evidence,ensure_ascii=False) if tb_evidence is not None else None})
         return pd.DataFrame(out)
+
+    # ---------- Manual match builder + save/load mapping support ----------
+
+    def resolve_rule_template(self, template, tb, submissions):
+        """Re-resolve a portable rule template (stable keys only: account /
+        description / bs_mapping on the TB side, line description / sheet /
+        currency on the submission side) against a *current* TB + submissions
+        session. Used both right after building a manual match (trivial,
+        exact resolution) and when a saved mapping file is re-uploaded against
+        a new period's data (fuzzy, best-effort — every miss/low-confidence
+        hit is reported as a warning instead of silently dropped)."""
+        warnings=[]
+        tb_components=[]
+        for item in template.get('tb_side',[]) or []:
+            acct=str(item.get('account') or '').strip()
+            desc=str(item.get('account_desc') or '').strip()
+            bsmap=item.get('bs_mapping'); ccy=item.get('currency')
+            cand=tb
+            if acct:
+                hit=tb[tb.account.astype(str).str.strip()==acct]
+                if len(hit): cand=hit
+                else: cand=tb.iloc[0:0]
+            if not len(cand) and desc:
+                pool=tb[tb.bs_mapping==bsmap] if bsmap and (tb.bs_mapping==bsmap).any() else tb
+                best_idx,best_score=None,0.0
+                for idx,row in pool.iterrows():
+                    sc=text_similarity(desc,row.account_desc)
+                    if sc>best_score: best_idx,best_score=idx,sc
+                cand = tb.loc[[best_idx]] if best_idx is not None and best_score>=0.55 else tb.iloc[0:0]
+            if ccy and len(cand):
+                ccy_hit=cand[cand.tran_ccy==ccy]
+                if len(ccy_hit): cand=ccy_hit
+            if not len(cand):
+                warnings.append(f"TB item not found: account={acct or '—'!s} description={desc or '—'!s}")
+                continue
+            for _,row in cand.iterrows():
+                tb_components.append({'account':row.account,'account_desc':row.account_desc,'bs_mapping':row.bs_mapping,
+                                       'currency':row.tran_ccy,'amount':float(row.adjusted_balance),'sign':item.get('sign',1)})
+
+        sub_components=[]
+        for item in template.get('submission_side',[]) or []:
+            text=item.get('match_text') or item.get('line_description') or ''
+            sheet=item.get('sheet'); ccy=item.get('currency'); want_total=item.get('is_total')
+            pool=submissions
+            if sheet is not None and len(pool):
+                p2=pool[pool.sheet==sheet]
+                if len(p2): pool=p2
+            if ccy and len(pool):
+                p2=pool[pool.currency==ccy]
+                if len(p2): pool=p2
+            if want_total and len(pool):
+                p2=pool[pool.is_total==True]
+                if len(p2): pool=p2
+            if not len(pool):
+                warnings.append(f"Submission item not found (no candidate rows): {text!r}")
+                continue
+            best_idx,best_score=None,0.0
+            for idx,row in pool.iterrows():
+                sc=text_similarity(text,row.line_description)
+                if sc>best_score: best_idx,best_score=idx,sc
+            if best_idx is None or best_score<0.5:
+                warnings.append(f"Submission item low-confidence match, please review: {text!r} (best match score {best_score:.2f})")
+                continue
+            row=submissions.loc[best_idx]
+            sub_components.append({'submission_file':row.submission_file,'sheet':row.sheet,'row_number':int(row.row_number),
+                                    'source_cell':row.source_cell,'line_description':row.line_description,'currency':row.currency,
+                                    'amount':float(row.normalized_amount),'multiplier':1,'sign':item.get('sign',1),
+                                    'match_confidence':round(best_score,3)})
+            if best_score<0.85:
+                warnings.append(f"Submission item matched with moderate confidence ({best_score:.2f}): {text!r} → {row.line_description!r}")
+
+        resolved={'bs_mapping':template.get('label') or 'Imported match','label':template.get('label'),
+                  'currency':template.get('currency','TOTAL'),'rule_type':template.get('rule_type','MANUAL_CLUB'),
+                  'source':'IMPORTED','tb_components':tb_components,'components':sub_components}
+        return resolved, warnings
 
     # ---------- Lineage ----------
 
@@ -387,7 +568,7 @@ class ReconEngine:
                     rows.append({'hierarchy':' / '.join(cur),'level':node['level'],'currency':m.get('currency'),
                                  'tb_amount':m.get('tb_amount'),'submission_amount':m.get('submission_amount'),
                                  'difference':m.get('difference'),'status':m.get('status'),'source':m.get('source'),
-                                 'rule_type':m.get('rule_type'),'evidence':m.get('evidence')})
+                                 'rule_type':m.get('rule_type'),'evidence':m.get('evidence'),'tb_evidence':m.get('tb_evidence')})
             elif not children:
                 totals=node.get('currency_totals') or {}
                 rows.append({'hierarchy':' / '.join(cur),'level':node['level'],'currency':'TOTAL',
@@ -398,6 +579,40 @@ class ReconEngine:
         return pd.DataFrame(rows)
 
     # ---------- Export ----------
+
+    def _style_workbook(self, path):
+        wb=load_workbook(path)
+        navy='173A5E'
+        for ws in wb.worksheets:
+            ws.freeze_panes='A2'; ws.sheet_view.showGridLines=False
+            try: ws.auto_filter.ref=ws.dimensions
+            except Exception: pass
+            for c in ws[1]: c.fill=PatternFill('solid',fgColor=navy); c.font=Font(color='FFFFFF',bold=True); c.alignment=Alignment(vertical='center')
+            for col in ws.columns:
+                letter=get_column_letter(col[0].column); width=min(42,max(12,max(len(str(x.value or '')) for x in col)+2)); ws.column_dimensions[letter].width=width
+            for row in ws.iter_rows(min_row=2):
+                for c in row:
+                    if isinstance(c.value,(int,float)): c.number_format='#,##0.00;[Red](#,##0.00);-'
+        wb.save(path); return path
+
+    def export_submissions(self, submissions, path=None):
+        """A clean, simplified workbook of what was actually extracted from
+        the submission sheets — the raw tagged lines plus a currency pivot —
+        so the user can hand it to someone else or archive it independently
+        of the full audit workbook."""
+        path=path or tempfile.mktemp(suffix='.xlsx')
+        df=submissions.drop(columns=['hierarchy'],errors='ignore').copy() if submissions is not None else pd.DataFrame()
+        cols=['submission_file','sheet','hierarchy_path','line_description','is_total','currency','raw_amount','scale','normalized_amount','source_cell','row_number']
+        cols=[c for c in cols if c in df.columns]
+        lines=df[cols] if len(df) else pd.DataFrame([{'Info':'No submission lines extracted yet.'}])
+        with pd.ExcelWriter(path,engine='openpyxl') as w:
+            lines.to_excel(w,sheet_name='Submission Lines',index=False)
+            if len(df):
+                pivot=pd.pivot_table(df,index=['submission_file','sheet','hierarchy_path','line_description'],
+                                      columns='currency',values='normalized_amount',aggfunc='sum',fill_value=0).reset_index()
+                pivot.columns=[str(c) for c in pivot.columns]
+                pivot.to_excel(w,sheet_name='Summary by Currency',index=False)
+        return self._style_workbook(path)
 
     def export(self, tb, pivot, submissions=None, recon=None, suggestions=None, lineage=None, path=None):
         path=path or tempfile.mktemp(suffix='.xlsx')
@@ -410,15 +625,5 @@ class ReconEngine:
             if submissions is not None and len(submissions): submissions.drop(columns=['hierarchy'],errors='ignore').to_excel(w,sheet_name='04 Submission Inventory',index=False)
             if recon is not None and len(recon): recon.to_excel(w,sheet_name='05 Recon Results',index=False)
             if suggestions: pd.DataFrame(suggestions).drop(columns=['components','match_basis'],errors='ignore').to_excel(w,sheet_name='06 Auto Suggestions',index=False)
-            if lineage is not None and len(lineage): lineage.drop(columns=['evidence'],errors='ignore').to_excel(w,sheet_name='07 Reconciliation Map',index=False)
-        wb=load_workbook(path)
-        navy='173A5E'; blue='1D70B8'; light='EAF3FA'; thin=Side(style='thin',color='D9E2EA')
-        for ws in wb.worksheets:
-            ws.freeze_panes='A2'; ws.sheet_view.showGridLines=False; ws.auto_filter.ref=ws.dimensions
-            for c in ws[1]: c.fill=PatternFill('solid',fgColor=navy); c.font=Font(color='FFFFFF',bold=True); c.alignment=Alignment(vertical='center')
-            for col in ws.columns:
-                letter=get_column_letter(col[0].column); width=min(42,max(12,max(len(str(x.value or '')) for x in col)+2)); ws.column_dimensions[letter].width=width
-            for row in ws.iter_rows(min_row=2):
-                for c in row:
-                    if isinstance(c.value,(int,float)): c.number_format='#,##0.00;[Red](#,##0.00);-'
-        wb.save(path); return path
+            if lineage is not None and len(lineage): lineage.drop(columns=['evidence','tb_evidence'],errors='ignore').to_excel(w,sheet_name='07 Reconciliation Map',index=False)
+        return self._style_workbook(path)

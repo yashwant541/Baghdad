@@ -96,6 +96,29 @@ def submissions_extract():
     return jsonify({'ok':True,'count':len(d['sub_df']),'preview':json.loads(preview.head(400).to_json(orient='records')),
                     'suggestions':d['suggestions']})
 
+@app.route('/api/submissions/export',methods=['GET'])
+def submissions_export():
+    sid=request.args.get('session_id'); _,d=get_session(sid)
+    if d.get('sub_df') is None or not len(d['sub_df']):return jsonify({'ok':False,'error':'No submission lines extracted yet.'}),400
+    eng=ReconEngine()
+    path=os.path.join(d['dir'],'Submissions_Simplified.xlsx')
+    eng.export_submissions(d['sub_df'],path)
+    return send_file(path,as_attachment=True,download_name='Submissions_Simplified.xlsx')
+
+@app.route('/api/rules/resolve',methods=['POST','OPTIONS'])
+def rules_resolve():
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    if d.get('tb') is None or d.get('sub_df') is None:
+        return jsonify({'ok':False,'error':'Upload a Trial Balance and process submissions before importing a mapping.'}),400
+    templates=body.get('templates',[])
+    if not templates:return jsonify({'ok':False,'error':'The uploaded mapping file has no matches in it.'}),400
+    eng=ReconEngine(); out=[]
+    for t in templates:
+        resolved,warnings=eng.resolve_rule_template(t,d['tb'],d['sub_df'])
+        out.append({'resolved':resolved,'warnings':warnings})
+    return jsonify({'ok':True,'results':out})
+
 @app.route('/api/reconcile',methods=['POST','OPTIONS'])
 def reconcile():
     body=request.get_json(force=True,silent=True) or {}
