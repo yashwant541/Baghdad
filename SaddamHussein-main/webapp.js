@@ -4,6 +4,7 @@
    through api() which never lets a non-JSON / error response fail silently. */
 
 let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbItems:[],tbSel:new Set(),
+  tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
   subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),
   suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[]};
 
@@ -100,6 +101,7 @@ async function uploadTB(){
   const j=await api('/api/tb',{method:'POST',body:fd});
   state.pivot=j.preview; state.pivotCols=j.columns; state.tbTree=j.tree;
   state.tbItems=flattenTbItems(state.tbTree); state.tbSel=new Set();
+  state.tbGroupItems=flattenTbGroups(state.tbTree); state.tbSelGroups=new Set();
   $('tbMessage').innerHTML=`<div class="notice good">Detected sheet <b>${esc(j.meta.sheet)}</b>, header row <b>${j.meta.header_row}</b>, ${j.meta.rows} data rows.</div>`;
   $('kpis').innerHTML=Object.entries(j.kpis).map(([k,v])=>`<div class="kpi"><small>${esc(k.replace('_',' '))}</small><b>${esc(fmt(v))}</b></div>`).join('');
   renderPivot(); renderTbTree(); renderTbPicker(); setStatus('TB pivot ready'); go('pivot');
@@ -265,21 +267,71 @@ function flattenTbItems(tree){
   (tree||[]).forEach(walk);
   return out;
 }
+function collectTbAccounts(node){
+  let out=(node.accounts||[]).slice();
+  (node.children||[]).forEach(c=>{ out=out.concat(collectTbAccounts(c)); });
+  return out;
+}
+// one selectable row per (BS Mapping group or sub-group, currency) — the
+// same grouping the TB Pivot page already shows. Picking one of these is
+// equivalent to multi-selecting every account underneath it at once, so a
+// whole pivot-level group can be clubbed against a submission total in a
+// single click instead of hunting down each account.
+function flattenTbGroups(tree){
+  const out=[];
+  function walk(node,path){
+    const label = node.name==='(Direct)' ? path.join(' / ') : path.concat([node.name]).join(' / ');
+    const nextPath = node.name==='(Direct)' ? path : path.concat([node.name]);
+    const allAccounts=collectTbAccounts(node);
+    Object.entries(node.currency_totals||{}).forEach(([ccy,amt])=>{
+      const accounts = ccy==='TOTAL' ? allAccounts : allAccounts.filter(a=>a.currency===ccy);
+      out.push({label:label||node.name,level:node.level,currency:ccy,amount:amt,accounts});
+    });
+    (node.children||[]).forEach(c=>walk(c,nextPath));
+  }
+  (tree||[]).forEach(g=>walk(g,[]));
+  return out;
+}
 function filteredIndexed(list,query){
   const q=(query||'').toLowerCase();
   const idx=list.map((it,i)=>({it,i}));
   return q?idx.filter(({it})=>JSON.stringify(it).toLowerCase().includes(q)):idx;
 }
+// merges whatever's checked at both the account level and the group
+// (pivot) level into one deduped list of TB accounts, so a user can freely
+// mix "this whole group" with "plus this one extra account" in one match
+// without double-counting anything the group already covers.
+function collectSelectedTbAccounts(){
+  const map=new Map();
+  [...state.tbSel].map(i=>state.tbItems[i]).filter(Boolean).forEach(it=>{
+    map.set(it.account+'|'+it.currency+'|'+it.bs_mapping,it);
+  });
+  [...state.tbSelGroups].map(i=>state.tbGroupItems[i]).filter(Boolean).forEach(g=>{
+    g.accounts.forEach(a=>map.set(a.account+'|'+a.currency+'|'+a.bs_mapping,a));
+  });
+  return [...map.values()];
+}
 function renderTbPicker(){
   const list=$('tbPickerList'); if(!list) return;
-  const all=filteredIndexed(state.tbItems,$('tbPickerSearch')?.value);
+  document.querySelectorAll('#tbLevelToggle .levelBtn').forEach(b=>b.classList.toggle('active',b.dataset.level===state.tbLevel));
+  const isGroup=state.tbLevel==='group';
+  const source=isGroup?state.tbGroupItems:state.tbItems;
+  const selSet=isGroup?state.tbSelGroups:state.tbSel;
+  const action=isGroup?'toggle-tb-group':'toggle-tb-item';
+  $('tbPickerSearch').placeholder=isGroup?'Search BS mapping group (e.g. Assets, Other Assets)':'Search account, description or BS mapping';
+  const all=filteredIndexed(source,$('tbPickerSearch')?.value);
   const shown=all.slice(0,300);
-  list.innerHTML=shown.map(({it,i})=>`
+  list.innerHTML=shown.map(({it,i})=>isGroup?`
     <label class="pickerItem">
-      <input type="checkbox" data-action="toggle-tb-item" data-index="${i}" ${state.tbSel.has(i)?'checked':''}>
+      <input type="checkbox" data-action="${action}" data-index="${i}" ${selSet.has(i)?'checked':''}>
+      <div class="pMeta"><div class="pTitle">${esc(it.label)} <span class="chip">${it.accounts.length} acct${it.accounts.length!==1?'s':''}</span></div><div class="pSub">BS Mapping group total (pivot level)</div></div>
+      <div class="pAmt">${esc(it.currency)} ${esc(fmt(it.amount))}</div>
+    </label>`:`
+    <label class="pickerItem">
+      <input type="checkbox" data-action="${action}" data-index="${i}" ${selSet.has(i)?'checked':''}>
       <div class="pMeta"><div class="pTitle">${esc(it.account)} — ${esc(it.account_desc)}</div><div class="pSub">${esc(it.bs_mapping)}</div></div>
       <div class="pAmt">${esc(it.currency)} ${esc(fmt(it.amount))}</div>
-    </label>`).join('') || '<div class="muted" style="padding:14px">No Trial Balance items yet — upload one first.</div>';
+    </label>`).join('') || `<div class="muted" style="padding:14px">${isGroup?'No BS Mapping groups yet':'No Trial Balance items yet'} — upload a Trial Balance first.</div>`;
   if(all.length>300) list.insertAdjacentHTML('beforeend',`<div class="muted" style="padding:8px 11px">Showing first 300 of ${all.length} — refine your search</div>`);
   updateTbPickerSum();
 }
@@ -297,8 +349,9 @@ function renderSubPicker(){
   updateSubPickerSum();
 }
 function updateTbPickerSum(){
-  const sel=[...state.tbSel].map(i=>state.tbItems[i]).filter(Boolean);
-  if($('tbPickerCount')) $('tbPickerCount').textContent=sel.length+' selected';
+  const sel=collectSelectedTbAccounts();
+  const pickCount=state.tbSel.size+state.tbSelGroups.size;
+  if($('tbPickerCount')) $('tbPickerCount').textContent=pickCount+' selected'+(sel.length!==pickCount?` (${sel.length} accounts)`:'');
   if($('tbPickerSum')) $('tbPickerSum').textContent=fmt(sel.reduce((a,it)=>a+it.amount,0));
   updateMatchPreview();
 }
@@ -330,7 +383,7 @@ function detectScale(tbSum,rawSubSum){
 }
 function updateMatchPreview(){
   const box=$('matchPreview'); if(!box) return;
-  const tbSel=[...state.tbSel].map(i=>state.tbItems[i]).filter(Boolean);
+  const tbSel=collectSelectedTbAccounts();
   const subSel=[...state.subSel].map(i=>state.subPreview[i]).filter(Boolean);
   if(!tbSel.length||!subSel.length){ box.innerHTML=''; return; }
   const tbSum=tbSel.reduce((a,it)=>a+it.amount,0);
@@ -348,10 +401,10 @@ function updateMatchPreview(){
   }
 }
 function addManualMatch(){
-  if(!state.tbSel.size||!state.subSel.size){toast('Select at least one item on each side');return}
+  const tbSelItems=collectSelectedTbAccounts();
+  if(!tbSelItems.length||!state.subSel.size){toast('Select at least one item on each side');return}
   const label=($('matchLabel').value||'').trim();
   if(!label){toast('Give this match a short description');return}
-  const tbSelItems=[...state.tbSel].map(i=>state.tbItems[i]);
   const subSelItems=[...state.subSel].map(i=>state.subPreview[i]);
   const ccySet=new Set(tbSelItems.map(it=>it.currency));
   const currency=ccySet.size===1?[...ccySet][0]:'TOTAL';
@@ -365,7 +418,7 @@ function addManualMatch(){
   const components=subSelItems.map(it=>({submission_file:it.submission_file,sheet:it.sheet,row_number:it.row_number,source_cell:it.source_cell,
     line_description:it.line_description,currency:it.currency,is_total:!!it.is_total,amount:it.normalized_amount,multiplier:scale,sign:signAdj}));
   state.manualMatches.push({bs_mapping:label,label,currency,rule_type:'MANUAL_CLUB',source:'MANUAL',tb_components,components,warnings:[]});
-  state.tbSel.clear(); state.subSel.clear(); $('matchLabel').value='';
+  state.tbSel.clear(); state.tbSelGroups.clear(); state.subSel.clear(); $('matchLabel').value='';
   renderTbPicker(); renderSubPicker(); renderManualMatches(); updateMatchPreview();
   toast('Manual match added');
 }
@@ -526,6 +579,21 @@ const CLICK_ACTIONS={
   'upload-subs':(el)=>guarded(el,uploadSubs),
   'extract-subs':(el)=>guarded(el,extractSubs),
   'download-submissions':()=>downloadSubmissions(),
+  'set-tb-level':(el)=>{ state.tbLevel=el.dataset.level; renderTbPicker(); },
+  'select-all-tb':()=>{
+    const source=state.tbLevel==='group'?state.tbGroupItems:state.tbItems;
+    const selSet=state.tbLevel==='group'?state.tbSelGroups:state.tbSel;
+    filteredIndexed(source,$('tbPickerSearch')?.value).forEach(({i})=>selSet.add(i));
+    renderTbPicker();
+  },
+  'clear-tb':()=>{
+    const source=state.tbLevel==='group'?state.tbGroupItems:state.tbItems;
+    const selSet=state.tbLevel==='group'?state.tbSelGroups:state.tbSel;
+    filteredIndexed(source,$('tbPickerSearch')?.value).forEach(({i})=>selSet.delete(i));
+    renderTbPicker();
+  },
+  'select-all-sub':()=>{ filteredIndexed(state.subPreview,$('subPickerSearch')?.value).forEach(({i})=>state.subSel.add(i)); renderSubPicker(); },
+  'clear-sub':()=>{ filteredIndexed(state.subPreview,$('subPickerSearch')?.value).forEach(({i})=>state.subSel.delete(i)); renderSubPicker(); },
   'add-manual-match':()=>addManualMatch(),
   'remove-manual-match':(el)=>{state.manualMatches.splice(+el.dataset.index,1);renderManualMatches()},
   'download-mapping':()=>downloadMapping(),
@@ -560,6 +628,9 @@ document.addEventListener('change',e=>{
   }
   if(el.dataset.action==='toggle-tb-item'){
     const i=+el.dataset.index; if(el.checked) state.tbSel.add(i); else state.tbSel.delete(i); updateTbPickerSum(); return;
+  }
+  if(el.dataset.action==='toggle-tb-group'){
+    const i=+el.dataset.index; if(el.checked) state.tbSelGroups.add(i); else state.tbSelGroups.delete(i); updateTbPickerSum(); return;
   }
   if(el.dataset.action==='toggle-sub-item'){
     const i=+el.dataset.index; if(el.checked) state.subSel.add(i); else state.subSel.delete(i); updateSubPickerSum(); return;

@@ -624,18 +624,26 @@ class ReconEngine:
             acct=str(item.get('account') or '').strip()
             desc=str(item.get('account_desc') or '').strip()
             bsmap=item.get('bs_mapping'); ccy=item.get('currency')
-            cand=tb
-            if acct:
+            # description is the primary key, not the account number: chart-
+            # of-accounts numbers get renumbered/reused across periods or
+            # systems far more often than a line's own description changes.
+            # Account number is only used as a tie-breaker when the
+            # description alone doesn't land on a single confident match.
+            cand=tb.iloc[0:0]
+            if desc:
+                pool=tb[tb.bs_mapping==bsmap] if bsmap and (tb.bs_mapping==bsmap).any() else tb
+                scored=sorted(((text_similarity(desc,row.account_desc),idx) for idx,row in pool.iterrows()),
+                              key=lambda x:-x[0])
+                if scored and scored[0][0]>=0.55:
+                    top_score=scored[0][0]
+                    tied=[idx for sc,idx in scored if sc>=top_score-1e-9]
+                    if len(tied)>1 and acct:
+                        exact=[idx for idx in tied if str(tb.loc[idx,'account']).strip()==acct]
+                        if exact: tied=exact
+                    cand=tb.loc[[tied[0]]]
+            if not len(cand) and acct:
                 hit=tb[tb.account.astype(str).str.strip()==acct]
                 if len(hit): cand=hit
-                else: cand=tb.iloc[0:0]
-            if not len(cand) and desc:
-                pool=tb[tb.bs_mapping==bsmap] if bsmap and (tb.bs_mapping==bsmap).any() else tb
-                best_idx,best_score=None,0.0
-                for idx,row in pool.iterrows():
-                    sc=text_similarity(desc,row.account_desc)
-                    if sc>best_score: best_idx,best_score=idx,sc
-                cand = tb.loc[[best_idx]] if best_idx is not None and best_score>=0.55 else tb.iloc[0:0]
             if ccy and len(cand):
                 ccy_hit=cand[cand.tran_ccy==ccy]
                 if len(ccy_hit): cand=ccy_hit

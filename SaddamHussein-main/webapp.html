@@ -76,13 +76,19 @@
 <div class="matchBuilder">
   <div class="pickerCol">
     <div class="pickerHead"><b>Trial Balance items</b><span class="muted" id="tbPickerCount">0 selected</span></div>
+    <div class="levelToggle" id="tbLevelToggle">
+      <button type="button" class="levelBtn active" data-action="set-tb-level" data-level="account">Accounts</button>
+      <button type="button" class="levelBtn" data-action="set-tb-level" data-level="group">BS Mapping groups (pivot level)</button>
+    </div>
     <input class="search" id="tbPickerSearch" placeholder="Search account, description or BS mapping">
+    <div class="pickerBulk"><button type="button" class="linkBtn" data-action="select-all-tb">Select all matching</button><button type="button" class="linkBtn" data-action="clear-tb">Clear</button></div>
     <div class="pickerList" id="tbPickerList"></div>
     <div class="pickerFoot">Selected total <b id="tbPickerSum">0</b></div>
   </div>
   <div class="pickerCol">
     <div class="pickerHead"><b>Submission items</b><span class="muted" id="subPickerCount">0 selected</span></div>
     <input class="search" id="subPickerSearch" placeholder="Search file, sheet or line description">
+    <div class="pickerBulk"><button type="button" class="linkBtn" data-action="select-all-sub">Select all matching</button><button type="button" class="linkBtn" data-action="clear-sub">Clear</button></div>
     <div class="pickerList" id="subPickerList"></div>
     <div class="pickerFoot">Selected total <b id="subPickerSum">0</b></div>
   </div>
