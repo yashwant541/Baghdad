@@ -1,17 +1,19 @@
+		Bank Name		ABC								
+		As of Date		31-3-2026							IN-BS-DVD-002	
 												
 												
-Financial Position / Balance Sheet (Monthly Statement) as of							31-3-2026	Central Bank of Iraq				
-								(Amounts in Thousand Iraqi Dinars)				
-Serial No.		Assets			Total	Accounts in Iraqi Dinars		Foreign Currency Accounts Converted to Iraqi Dinars				
-						Residents	Non-Residents	Residents	Non-Residents			
-		1 			2=(3+4+5+6)	3 	4 	5 	6 			
+Assets by Maturity											Central Bank of Iraq	
+												
+											(Amounts in Thousand Iraqi Dinars)	
+												
+Serial No.		Assets			Total	Less Than One Month	Between One and Three Months	Between Three and Six Months	Between Six Months and One Year	Between One and Five Years	More Than Five Years	Without Maturity
 1 		Cash Assets (A + B + C + D)										
 	A	Cash and Coins (Iraqi and Foreign) According to Schedules (1 & 2)										
 	B	Cash in Transit										
 	C	Balances with the Central Bank (First + Second) According to Schedule No. 3										
 		First	Balances with the Central Bank									
 		Second	Add: Accrued Interest Receivable									
-	D	 Net Balances Debtor / Debit Balance With Banks  ( First + Second + Third ) Less (Fourth ) Pursuant To / Under Schedule / Table Number ( 4 ) ( A , B ، C، D )  										
+	D	Net Debit Balances with Banks (First + Second) Plus (Third Less Fourth) According to Schedule No. 4 (A, B, C, D)										
 		First	Debit Balances with Banks									
 		Second	Add: Accrued Interest Receivable									
 		Third	Add: Disputed Accounts and Doubtful Balances									
@@ -35,13 +37,12 @@ Serial No.		Assets			Total	Accounts in Iraqi Dinars		Foreign Currency Accounts C
 		First	Invested Value									
 		Second	Less: Provision for Decline in Value of Shares and Investments									
 7 	Fixed Assets (A + B)											
-	A	 										
-		First	Held for Banking Purposes According to Schedule No. 16-A (List to be Prepared)									
+	A	Net Tangible Assets (First + Second) Less (Third + Fourth) According to Schedules 16-A and 16-B										
+		First	Held for Banking Purposes (List to be Prepared) According to Schedule No. 16-A									
 		Second	Acquired Through Debt Settlement According to Schedule No. 16-B									
 		Third	Less: Depreciation Provision									
 		Fourth	Less: Impairment Provision for Fixed Assets									
 	B	Intangible Assets										
 8 	Other Assets (List to be Prepared)											
 9 	Total Assets											
-												
-* Asset Schedules Numbered from 1 to 16												
+
