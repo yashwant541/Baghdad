@@ -1,0 +1,78 @@
+<div id="app">
+<header><div class="brand"><div class="mark">BI</div><div><b>Bahrain–Iraq Recon Studio</b><small>Financial logical reconciliation</small></div></div><div class="status" id="runStatus">New session</div></header>
+<aside>
+<div class="step active" data-page="welcome"><span>1</span>Overview</div>
+<div class="step" data-page="trial"><span>2</span>Trial Balance</div>
+<div class="step" data-page="pivot"><span>3</span>TB Pivot</div>
+<div class="step" data-page="subs"><span>4</span>Submissions</div>
+<div class="step" data-page="mapping"><span>5</span>Mapping Studio</div>
+<div class="step" data-page="results"><span>6</span>Recon Results</div>
+<div class="step" data-page="map"><span>7</span>Reconciliation Map</div>
+<div class="step" data-page="export"><span>8</span>Export</div>
+</aside>
+<main>
+
+<section id="welcome" class="page active">
+<div class="hero"><div><span class="eyebrow">CONTROLLED RECONCILIATION WORKFLOW</span><h1>From Trial Balance to a fully explainable reconciliation.</h1>
+<p>Build the TB pivot, choose exactly which submission sheets to read, let the engine detect currency columns, totals and section hierarchy even in imperfect layouts, then review every Assets↔Assets, sub‑group↔sub‑group and USD↔USD / Total↔Total match before it's approved.</p>
+<button class="primary" onclick="go('trial')">Start with Trial Balance →</button></div>
+<div class="flow"><b>Process</b>
+<div><span>1</span> Trial Balance <i>→</i> Pivot</div>
+<div><span>2</span> Select submission sheets <i>→</i> Structural extraction</div>
+<div><span>3</span> Auto-match groups, sub‑groups, currencies &amp; totals</div>
+<div><span>4</span> Review / approve <i>→</i> Reconciliation</div>
+<div><span>5</span> Full lineage map <i>→</i> Excel export</div>
+</div></div>
+<div class="grid3">
+<article><b>Table-aware reading</b><p>Header, currency and total columns are detected per sheet from real formatting (bold, indentation) — not a fixed layout.</p></article>
+<article><b>Currency &amp; total aware</b><p>USD is only ever compared with USD, IQD with IQD, and Total with Total. Credit/debit sign convention is inferred automatically.</p></article>
+<article><b>Full lineage</b><p>Every accepted match keeps its file, sheet, cell and grouping evidence, shown end‑to‑end in the Reconciliation Map.</p></article>
+</div></section>
+
+<section id="trial" class="page"><div class="title"><div><h2>Upload Trial Balance</h2><p>Dynamic sheet and header detection. No managed folder required.</p></div><span class="badge">Step 2</span></div>
+<div class="upload" id="tbDrop"><input id="tbFile" type="file" accept=".xlsx,.xlsm"><div class="uploadIcon">↑</div><h3>Drop the Trial Balance here</h3><p>Excel workbook, processed temporarily in the WebApp session</p><button class="secondary" onclick="tbFile.click()">Choose file</button></div>
+<div class="actions"><button class="primary" onclick="uploadTB()">Inspect and build pivot</button></div>
+<div id="tbMessage"></div><div id="kpis" class="kpis"></div></section>
+
+<section id="pivot" class="page"><div class="title"><div><h2>Trial Balance Pivot</h2><p>Rows: BS Mapping → Account → Account Desc | Columns: Tran Ccy | Values: Sum of Adjusted Balance</p></div><button class="secondary" onclick="downloadOutput()">Download Excel</button></div>
+<input class="search" id="pivotSearch" placeholder="Search mapping, account or description" oninput="renderPivot()"><div class="tableWrap"><table id="pivotTable"></table></div>
+<div class="title" style="margin-top:26px"><div><h3 style="margin:0">Group / Sub‑group structure detected in the Trial Balance</h3><p>Used to auto‑match against submission sections</p></div></div>
+<div id="tbTreePreview" class="treeWrap"></div>
+</section>
+
+<section id="subs" class="page"><div class="title"><div><h2>Upload Submission Files</h2><p>Upload up to three workbooks, then choose exactly which sheets to read into the reconciliation.</p></div><span class="badge">Step 4</span></div>
+<div class="upload"><input id="subFiles" type="file" accept=".xlsx,.xlsm" multiple><div class="uploadIcon">⇧</div><h3>Select the submissions</h3><p>Assets, liabilities/capital, and other supporting submission (max 3)</p><button class="secondary" onclick="subFiles.click()">Choose files</button></div>
+<div class="actions"><button class="primary" onclick="uploadSubs()">Inspect workbooks</button></div>
+<div id="subMessage"></div>
+<div id="sheetPicker"></div>
+<div class="actions" id="extractActions" style="display:none"><button class="primary" onclick="extractSubs()">Extract selected sheets →</button></div>
+<div id="subExtractMessage"></div>
+<div class="tableWrap"><table id="subTable"></table></div>
+</section>
+
+<section id="mapping" class="page"><div class="title"><div><h2>Mapping Studio</h2><p>Review the engine's suggested matches, then add manual rules for anything it couldn't resolve.</p></div><button class="secondary" onclick="addRule()">+ Manual rule</button></div>
+
+<div class="notice">Nothing is reconciled automatically. Every suggestion below must be explicitly approved; unapproved suggestions are ignored when you run the reconciliation.</div>
+<div id="suggestionSummary" class="kpis"></div>
+<div id="suggestions"></div>
+
+<h3 class="subhead">Manual rules</h3>
+<div class="notice">Use this for anything the auto-matcher missed or matched incorrectly.</div>
+<div id="rules"></div>
+<div class="actions"><label>Absolute tolerance <input id="tolAbs" type="number" value="1" step="0.01"></label><label>Percentage tolerance <input id="tolPct" type="number" value="0.0001" step="0.0001"></label><button class="primary" onclick="runRecon()">Run reconciliation →</button></div>
+</section>
+
+<section id="results" class="page"><div class="title"><div><h2>Reconciliation Results</h2><p>Traceable amounts, variance and review status per group, sub‑group and currency.</p></div><button class="secondary" onclick="downloadOutput()">Export workbook</button></div>
+<div id="resultSummary" class="kpis"></div><div class="tableWrap"><table id="resultTable"></table></div></section>
+
+<section id="map" class="page"><div class="title"><div><h2>Reconciliation Map</h2><p>How every Trial Balance group connects to its submission evidence — the full lineage, end to end.</p></div><button class="secondary" onclick="downloadOutput()">Export workbook</button></div>
+<div id="mapLegend" class="legend"></div>
+<div id="lineageTree" class="treeWrap"></div>
+</section>
+
+<section id="export" class="page"><div class="exportCard"><div class="bigIcon">✓</div><h2>Audit-ready workbook</h2>
+<p>Includes executive summary, TB pivot, TB detail, submission inventory, auto‑suggestions, reconciliation results and the full reconciliation map.</p>
+<button class="primary" onclick="downloadOutput()">Download reconciliation workbook</button>
+<small>Temporary session files are not written to a Dataiku managed folder.</small></div></section>
+
+</main><div id="toast"></div></div>
