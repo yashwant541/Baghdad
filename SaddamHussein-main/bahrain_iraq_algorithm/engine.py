@@ -23,10 +23,39 @@ ALIASES = {
 CURRENCY_CODES = ["USD","IQD","BHD","EUR","GBP","AED","SAR","KWD","QAR","OMR","JOD","CHF","JPY","CNY"]
 CURRENCY_PATTERN = re.compile(r"\b(" + "|".join(CURRENCY_CODES) + r")\b", re.I)
 LOCAL_CCY_PATTERN = re.compile(r"\blocal\s*currency\b|\blcy\b", re.I)
+# many real-world templates (this Central Bank of Iraq one included) spell the
+# currency out by name rather than by ISO code — "Accounts in Iraqi Dinars",
+# "Foreign Currency Accounts Converted to Iraqi Dinars" — so the ISO-code
+# regex alone misses every column. Checked in order: qualified/unambiguous
+# names first, bare "Dollars"/"Dirhams" (common shorthand for USD/AED) last.
+CURRENCY_NAME_PATTERNS = [
+    (re.compile(r"\biraqi\s+dinars?\b", re.I), "IQD"),
+    (re.compile(r"\bbahraini\s+dinars?\b", re.I), "BHD"),
+    (re.compile(r"\bkuwaiti\s+dinars?\b", re.I), "KWD"),
+    (re.compile(r"\bjordanian\s+dinars?\b", re.I), "JOD"),
+    (re.compile(r"\bu\.?s\.?\s*dollars?\b", re.I), "USD"),
+    (re.compile(r"\bsaudi\s+riyals?\b", re.I), "SAR"),
+    (re.compile(r"\bqatari\s+riyals?\b", re.I), "QAR"),
+    (re.compile(r"\bomani\s+rials?\b", re.I), "OMR"),
+    (re.compile(r"\b(emirati|uae)\s+dirhams?\b", re.I), "AED"),
+    (re.compile(r"\beuros?\b", re.I), "EUR"),
+    (re.compile(r"\bpound\s*sterling\b|\bsterling\b", re.I), "GBP"),
+    (re.compile(r"\bdollars?\b", re.I), "USD"),
+    (re.compile(r"\bdirhams?\b", re.I), "AED"),
+]
+def match_currency_name(text):
+    for pat, code in CURRENCY_NAME_PATTERNS:
+        if pat.search(text): return code
+    return None
+
 TOTAL_PATTERN = re.compile(r"\b(grand\s+total|sub\s*-?\s*total|total)\b", re.I)
+# a column-index / cross-reference row some regulatory templates print under
+# the real header — e.g. "2=(3+4+5+6)" — reads as plausible-looking small
+# integers per column and must never be mistaken for a real data line.
+FORMULA_REF_PATTERN = re.compile(r"\d+\s*=\s*\([^)]*[+\-][^)]*\)")
 TOTAL_PREFIX = re.compile(r"^(grand\s+total\s+of\s+|grand\s+total\s+|sub[\s-]?total\s+of\s+|sub[\s-]?total\s+|total\s+of\s+|total\s+)", re.I)
-SCALE_THOUSANDS = re.compile(r"\(?'?000\b\)?|in\s+thousands|thousands", re.I)
-SCALE_MILLIONS = re.compile(r"\(?'?mn'?\)?|in\s+millions|millions", re.I)
+SCALE_THOUSANDS = re.compile(r"\(?'?000\b\)?|in\s+thousands?\b|\bthousands?\b", re.I)
+SCALE_MILLIONS = re.compile(r"\(?'?mn'?\)?|in\s+millions?\b|\bmillions?\b", re.I)
 HIERARCHY_DELIMS = [" > ", " / ", " - ", " – ", " :: ", " | "]
 STOPWORDS = {"and","the","of","for","in","on","to","a","an","with","&"}
 # common reporting-scale multipliers to try numerically when a header's text
@@ -38,6 +67,19 @@ def strip_total_prefix(text):
     t = str(text or "").strip()
     s = TOTAL_PREFIX.sub("", t).strip()
     return s or t
+
+def forward_fill_headers(headers):
+    """Many real templates visually group several sub-columns under one
+    label ("Accounts in Iraqi Dinars" over Residents/Non-Residents) without
+    an actual Excel cell merge — the label only lives in the leftmost cell,
+    the rest of the group reads back blank. Carry it rightward so every
+    column in the group still classifies correctly."""
+    out=[]; last=''
+    for h in headers:
+        h=str(h or '').strip()
+        if h: last=h
+        out.append(last)
+    return out
 
 def detect_scale(text):
     t = str(text or "")
@@ -66,7 +108,11 @@ def classify_currency_header(text):
         return None
     is_total = bool(TOTAL_PATTERN.search(t))
     m = CURRENCY_PATTERN.search(t)
-    code = m.group(1).upper() if m else ("LCY" if LOCAL_CCY_PATTERN.search(t) else None)
+    code = m.group(1).upper() if m else None
+    if not code:
+        code = match_currency_name(t)
+    if not code and LOCAL_CCY_PATTERN.search(t):
+        code = "LCY"
     if is_total and code:
         return f"TOTAL_{code}"
     if is_total:
@@ -98,16 +144,34 @@ class ReconEngine:
     def _read_raw(self, path, sheet):
         return pd.read_excel(path, sheet_name=sheet, header=None, dtype=object, engine='openpyxl')
 
+    def _preamble_scale(self, raw, header_row):
+        """A scale note ("Amounts in Thousand Iraqi Dinars") very often sits
+        in the report's title block above the column headers, not inside any
+        header cell itself. Scan that preamble region once per sheet and use
+        it as the default for any currency column whose own header text
+        didn't state a scale."""
+        if header_row is None: return 1.0
+        for i in range(header_row):
+            for v in raw.iloc[i].tolist():
+                s=detect_scale(v)
+                if s!=1.0: return s
+        return 1.0
+
     def inspect_workbook(self, path):
         xls=pd.ExcelFile(path, engine='openpyxl'); out=[]
         for sheet in xls.sheet_names:
             raw=self._read_raw(path,sheet)
             header,score=self.detect_header(raw)
             headers=[] if header is None else [str(x).strip() if pd.notna(x) else '' for x in raw.iloc[header].tolist()]
+            preamble_scale=self._preamble_scale(raw,header)
+            filled_headers=forward_fill_headers(headers)
             currency_columns={}
-            for j,h in enumerate(headers):
+            for j,h in enumerate(filled_headers):
                 code=classify_currency_header(h)
-                if code: currency_columns[get_column_letter(j+1)]={'currency':code,'scale':detect_scale(h)}
+                if code:
+                    scale=detect_scale(h)
+                    if scale==1.0: scale=preamble_scale
+                    currency_columns[get_column_letter(j+1)]={'currency':code,'scale':scale}
             out.append({'sheet':sheet,'rows':int(raw.shape[0]),'columns':int(raw.shape[1]),
                         'header_row':None if header is None else int(header+1),'score':score,
                         'headers':headers[:60],'currency_columns':currency_columns})
@@ -208,7 +272,15 @@ class ReconEngine:
                     info['header_row']=int(override)
                     raw=self._read_raw(path,name); hr=int(override)-1
                     headers=[str(x).strip() if pd.notna(x) else '' for x in raw.iloc[hr].tolist()] if hr < len(raw) else []
-                    info['currency_columns']={get_column_letter(j+1):{'currency':classify_currency_header(h),'scale':detect_scale(h)} for j,h in enumerate(headers) if classify_currency_header(h)}
+                    preamble_scale=self._preamble_scale(raw,hr)
+                    filled_headers=forward_fill_headers(headers)
+                    info['currency_columns']={}
+                    for j,h in enumerate(filled_headers):
+                        code=classify_currency_header(h)
+                        if code:
+                            scale=detect_scale(h)
+                            if scale==1.0: scale=preamble_scale
+                            info['currency_columns'][get_column_letter(j+1)]={'currency':code,'scale':scale}
                 targets.append(info)
         else:
             targets = inspections
@@ -226,10 +298,27 @@ class ReconEngine:
             for r in range(len(raw)):
                 if header_row is not None and r<=header_row: continue
                 vals=raw.iloc[r].tolist()
-                label_col,label=None,''
+                # a column-index / cross-reference row (e.g. "2=(3+4+5+6)")
+                # is template scaffolding, not data — never mistake its small
+                # integers per column for a real financial line.
+                if any(pd.notna(v) and FORMULA_REF_PATTERN.search(str(v)) for v in vals):
+                    continue
+                # the label is the longest NON-numeric cell in the row, not
+                # simply the first non-empty one — many real templates put a
+                # bare serial number ("1") or letter ("A") in the leftmost
+                # column, with the actual account description several
+                # columns over. Falls back to "first non-empty" only if every
+                # non-empty cell in the row happens to be numeric-typed.
+                label_col,label,best_len=None,'',-1
                 for j,v in enumerate(vals):
-                    if pd.notna(v) and str(v).strip():
-                        label_col,label=j,str(v).strip(); break
+                    if not pd.notna(v): continue
+                    s=str(v).strip()
+                    if not s or self._to_number(v) is not None: continue
+                    if len(s)>best_len: label_col,label,best_len=j,s,len(s)
+                if label_col is None:
+                    for j,v in enumerate(vals):
+                        if pd.notna(v) and str(v).strip():
+                            label_col,label=j,str(v).strip(); break
                 if label_col is None: continue
                 numeric_cells={}
                 for j,v in enumerate(vals):

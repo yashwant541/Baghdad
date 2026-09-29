@@ -1,0 +1,26 @@
+# Bahrain–Iraq Recon Studio: Dataiku installation
+
+1. Create a **Standard Webapp** in the Dataiku project.
+2. Copy `webapp.html`, `webapp.css`, `webapp.js`, and `backend.py` into the corresponding WebApp editors.
+3. Copy the entire `bahrain_iraq_algorithm` folder into the project Python library. The library name must remain `bahrain_iraq_algorithm`.
+4. Add `pandas`, `openpyxl`, and `numpy` to the Dataiku code environment used by the WebApp.
+5. Restart the backend and open the WebApp.
+
+## Workflow
+- Upload the Trial Balance; the engine detects its header row and builds the summarized pivot plus a group/sub‑group hierarchy tree (split from the BS Mapping column).
+- Upload up to three submission workbooks. Every sheet is inspected — header row, currency columns (USD/IQD/BHD/…, including a `'000`/`million` scale) and a Total column are detected automatically, but nothing is read until you tick the sheets you want (and optionally correct the header row) in the sheet picker.
+- Extraction reads each selected sheet structurally: bold/indented rows become section and sub‑section headers, "Total …" rows are flagged, and every numeric cell is tagged with its currency, scale and exact cell reference.
+- The engine proposes candidate reconciliation rules automatically: Assets↔Assets, sub‑group↔sub‑group, and currency‑for‑currency / Total‑for‑Total, with an inferred sign convention. When the blanket "sum every line in this section" total doesn't reconcile and there's no sheet-provided Total row to trust, it also runs a bounded subset search over that same section's lines and — if some specific subset does reconcile — adds it as a second, clearly labelled "Auto‑clubbed subset" suggestion alongside the blanket one, explaining which line(s) it excluded. Nothing is applied until you approve each suggestion in Mapping Studio, and the two never auto-approve simultaneously for the same group/currency.
+- **Reporting-scale mismatches (thousands/millions) are checked two ways.** At extraction, a column header's own text (`'000`, `thousands`, `million`) sets the scale automatically. Separately — and this matters when the header gives *no* textual clue at all while the values are quietly divided by 1,000 or 1,000,000 — every suggestion, manual match and re-imported mapping is also checked *numerically*: if the values don't reconcile at face value but do after applying a common scale factor (and/or a sign flip), that's surfaced as a clearly labelled "Scale-adjusted" suggestion (or applied automatically in the manual builder, with the applied factor always shown, never hidden).
+- You can download the extracted submission lines as a standalone, simplified workbook at any point after extraction (Submissions step) — independent of the full audit export.
+- For anything the auto-matcher missed, build a **manual match**: multi-select any combination of Trial Balance accounts on the left and submission lines on the right (a single item, several accounts clubbed together, or a whole sub-total against a whole sub-total — as long as it's financially logical) and give it a short description. The running totals on both sides update live as you select, including a live warning if a scale/sign adjustment would be needed to reconcile them.
+- **Save/load a mapping**: download everything you've built as a portable JSON mapping file, then re-upload it after a future period's Trial Balance and submissions are processed — each match is re-resolved against the *new* data (by account number/description on the TB side, by line description/sheet/currency on the submission side) and added back for review, with any low-confidence or unresolved items flagged rather than silently applied.
+- Run the reconciliation, then review the full Reconciliation Map — every TB group and sub‑group with its approved submission evidence (file, sheet, cell, amount), plus a dedicated section for manual/imported matches that carry their own label — before exporting the audit workbook.
+
+## Notes
+- Files are stored only in a temporary backend session directory; no managed folder is used.
+- The generated TB Pivot is a normal Excel summary sheet, not an Excel PivotTable cache object. It contains the requested hierarchy, currency columns, and summed Adjusted Balance.
+- The exported workbook adds an Auto Suggestions sheet and a Reconciliation Map sheet (flattened lineage) alongside the original summary/pivot/detail/submission/results sheets.
+- A rule that resolves to zero components on both sides (e.g. an imported mapping match that couldn't be found in the new data at all) is reported as `UNRESOLVED`, never as a trivial 0‑vs‑0 match — always check for that status after importing a mapping.
+- The webapp has no inline `on*` event handlers (CSP-safe) and every backend route always returns JSON, including on error — this matters if the WebApp is embedded behind a proxy that enforces a strict Content-Security-Policy.
+- For multi-user production deployment, replace the in-memory `SESSIONS` dictionary with an approved shared session store and apply the organisation's retention and access controls.
