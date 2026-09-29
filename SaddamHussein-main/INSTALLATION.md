@@ -1,48 +1,49 @@
-		Bank Name		ABC								
-		As of Date		31-3-2026							IN-BS-DVD-002	
-												
-												
-Assets by Maturity											Central Bank of Iraq	
-												
-											(Amounts in Thousand Iraqi Dinars)	
-												
-Serial No.		Assets			Total	Less Than One Month	Between One and Three Months	Between Three and Six Months	Between Six Months and One Year	Between One and Five Years	More Than Five Years	Without Maturity
-1 		Cash Assets (A + B + C + D)										
-	A	Cash and Coins (Iraqi and Foreign) According to Schedules (1 & 2)										
-	B	Cash in Transit										
-	C	Balances with the Central Bank (First + Second) According to Schedule No. 3										
-		First	Balances with the Central Bank									
-		Second	Add: Accrued Interest Receivable									
-	D	Net Debit Balances with Banks (First + Second) Plus (Third Less Fourth) According to Schedule No. 4 (A, B, C, D)										
-		First	Debit Balances with Banks									
-		Second	Add: Accrued Interest Receivable									
-		Third	Add: Disputed Accounts and Doubtful Balances									
-		Fourth	Less: Provision for Disputed and Doubtful Balances									
-2 		Head Office and Branches										
-3 		Net Investments In Papers / Securities Financial ( A+B - C)  Pursuant To / Under Schedule / Table ( 5 )  ( A   , B  )										
-	A	Investments in Securities										
-	B	Add: Accrued Interest Receivable										
-	C	Less: Interest Received in Advance										
-4 		Net Credit Cash ( A + B ) Pursuant To / Under Schedules / Tables ( 13،12،11،10،9،8،7،6 )										
-	A	Net Debts / Liabilities Producing / Productive ( First + Second) Less ( Third )										
-		First -	Performing Loans									
-		Second	Add: Accrued Interest Receivable									
-		Third	Less :-Interest Received In Advance									
-	B	Net Non-Performing Loans {First Less (Second + Third)}										
-		First -	Non-Performing Loans									
-		Second	Less: Provision on Non-Performing Loans									
-		Third	Less: Accrued Interest on Due and Unpaid Credit									
-5 	Financial Derivatives Valuation Differences (According to Schedule No. 14)											
-6 	Net Investments in Shares and Equity Interests (First Less Second) According to Schedule No. 15											
-		First	Invested Value									
-		Second	Less: Provision for Decline in Value of Shares and Investments									
-7 	Fixed Assets (A + B)											
-	A	Net Tangible Assets (First + Second) Less (Third + Fourth) According to Schedules 16-A and 16-B										
-		First	Held for Banking Purposes (List to be Prepared) According to Schedule No. 16-A									
-		Second	Acquired Through Debt Settlement According to Schedule No. 16-B									
-		Third	Less: Depreciation Provision									
-		Fourth	Less: Impairment Provision for Fixed Assets									
-	B	Intangible Assets										
-8 	Other Assets (List to be Prepared)											
-9 	Total Assets											
+											
+											
+											
+											
+Assets by Foreign Currency										IN-BS-DVD-003	
+											
+									Central Bank of Iraq		
+									Amounts in Thousand Iraqi Dinars		
+Serial No.		Assets			Total	US Dollar	Euro	Pound Sterling (GBP)	Jordanian Dinar	Saudi Riyal	Other Foreign Currencies (Converted)
+					Equivalent in Thousand Dinars						
+1 		Cash Assets (A + B + C + D)									
+	A	Cash and Coins (Iraqi and Foreign) According to Schedules (1 & 2)									
+	B	Cash in Transit									
+	C	Balances with the Central Bank (First + Second) According to Schedule No. 3									
+		First	Balances with the Central Bank								
+		Second	Add: Accrued Interest Receivable								
+	D	Net Debit Balances with Banks (First + Second) Plus (Third Less Fourth) According to Schedule No. 4 (A, B, C, D)									
+		First	Debit Balances with Banks								
+		Second	Add: Accrued Interest Receivable								
+		Third	Add: Disputed Accounts and Doubtful Balances								
+		Fourth	Less: Provision for Disputed and Doubtful Balances								
+2		Head Office and Branches									
+3		Net Investments In Papers / Securities Financial ( A+B - C)  Pursuant To / Under Schedule / Table ( 5 )  ( A   , B  )									
+	A	Investments in Securities									
+	B	Add: Accrued Interest Receivable									
+	C	Less: Interest Received in Advance									
+4		Net Credit Cash ( A + B ) Pursuant To / Under Schedules / Tables ( 13،12،11،10،9،8،7،6 )									
+	A	Net Debts / Liabilities Producing / Productive ( First + Second) Less ( Third )									
+		First -	Performing Loans								
+		Second	Add: Accrued Interest Receivable								
+		Third	Less :-Interest Received In Advance								
+	B	Net Non-Performing Loans {First Less (Second + Third)}									
+		First -	Non-Performing Loans								
+		Second	Less: Provision on Non-Performing Loans								
+		Third	Less: Accrued Interest on Due and Unpaid Credit								
+5	Financial Derivatives Valuation Differences (According to Schedule No. 14)										
+6	Net Investments in Shares and Equity Interests (First Less Second) According to Schedule No. 15										
+		First	Invested Value								
+		Second	Less: Provision for Decline in Value of Shares and Investments								
+7	Fixed Assets (A + B)										
+	A	Net Tangible Assets (First + Second) Less (Third + Fourth) According to Schedules 16-A and 16-B									
+		First	Held for Banking Purposes (List to be Prepared) According to Schedule No. 16-A								
+		Second	Acquired Through Debt Settlement According to Schedule No. 16-B								
+		Third	Less: Depreciation Provision								
+		Fourth	Less: Impairment Provision for Fixed Assets								
+	B	Intangible Assets									
+8	Other Assets (List to be Prepared)										
+9	Total Assets										
 
