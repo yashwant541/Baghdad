@@ -29,6 +29,10 @@ SCALE_THOUSANDS = re.compile(r"\(?'?000\b\)?|in\s+thousands|thousands", re.I)
 SCALE_MILLIONS = re.compile(r"\(?'?mn'?\)?|in\s+millions|millions", re.I)
 HIERARCHY_DELIMS = [" > ", " / ", " - ", " – ", " :: ", " | "]
 STOPWORDS = {"and","the","of","for","in","on","to","a","an","with","&"}
+# common reporting-scale multipliers to try numerically when a header's text
+# gives no '000/million clue at all (e.g. a bare "USD" column that's quietly
+# already divided by a thousand) — 1.0 is handled separately as the default.
+SCALE_CANDIDATES = (1000.0, 1000000.0, 0.001, 0.000001)
 
 def strip_total_prefix(text):
     t = str(text or "").strip()
@@ -266,21 +270,23 @@ class ReconEngine:
 
     # ---------- Auto-matching ----------
 
-    def find_submission_subset(self, items, target, tolerance_abs, tolerance_pct, max_combo=4, max_items=10):
+    def find_submission_subset(self, items, target, tolerance_abs, tolerance_pct, max_combo=4, max_items=10, scale=1.0):
         """Bounded subset-sum: which specific submission lines (out of a
         already section-matched pool) actually club up to a TB figure, when
         blindly summing every line in the pool doesn't reconcile and there's
         no sheet-provided Total row to trust instead. Deliberately narrow in
         scope — only ever called on items already confined to one matched TB
         group/sub-group and one matched submission section — so a numeric
-        coincidence across unrelated parts of the file can't be suggested."""
+        coincidence across unrelated parts of the file can't be suggested.
+        `scale` multiplies each line's amount first, so the same search also
+        covers "the right lines, but also reported at the wrong scale"."""
         n=len(items)
         if n==0 or n>max_items: return None
         tol=max(tolerance_abs, abs(target)*tolerance_pct)
         best=None
         for size in range(1, min(max_combo,n)+1):
             for combo in itertools.combinations(range(n), size):
-                s=sum(items[i]['normalized_amount'] for i in combo)
+                s=sum(items[i]['normalized_amount'] for i in combo)*scale
                 diff=abs(target-s)
                 if diff<=tol:
                     coverage=size/n
@@ -288,6 +294,24 @@ class ReconEngine:
                     if best is None or rank<best[0]:
                         best=(rank,combo)
         return best[1] if best else None
+
+    def best_scale_fit(self, raw_value, target, tolerance_abs, tolerance_pct, scales=SCALE_CANDIDATES):
+        """Beyond whatever scale a column header's text implied at extraction
+        time, check whether a common reporting-scale multiplier (thousands,
+        millions, or the reverse) — together with a possible sign flip —
+        would reconcile a raw value against the TB target on its own. Used
+        both by the auto-matcher and, client-side in JS, mirrored by the
+        manual match builder's live preview. Returns (scale, sign, diff) for
+        the closest fit within tolerance, or None."""
+        tol=max(tolerance_abs, abs(target)*tolerance_pct)
+        best=None
+        for scale in scales:
+            for sign in (1.0,-1.0):
+                s=raw_value*scale*sign
+                diff=abs(target-s)
+                if diff<=tol and (best is None or diff<best[2]):
+                    best=(scale,sign,diff)
+        return best
 
     def auto_match(self, tb_tree, submission_df, min_group_score=0.35, min_sub_score=0.3):
         if submission_df is None or submission_df.empty: return []
@@ -383,24 +407,52 @@ class ReconEngine:
                     # figure (e.g. one stray unrelated line in the same section is
                     # often the entire reason the blanket sum was off).
                     out_of_tolerance = abs(diff) > max(self.tolerance_abs, abs(tb_amt)*self.tolerance_pct)
-                    if ccy!='TOTAL' and not totals and out_of_tolerance and len(matches)>1:
-                        combo_idx=self.find_submission_subset(matches, tb_amt*resolved_sign, self.tolerance_abs, self.tolerance_pct)
-                        if combo_idx and len(combo_idx)<len(matches):
-                            chosen2=[matches[i] for i in combo_idx]
-                            sub_amt2=sum(r['normalized_amount'] for r in chosen2)*resolved_sign
-                            diff2=tb_amt-sub_amt2
+
+                    # a bare column header (no '000 / million wording at all)
+                    # can still hide a uniform reporting-scale factor — check
+                    # numerically, independent of whatever scale the header
+                    # text implied back at extraction time.
+                    if out_of_tolerance:
+                        fit=self.best_scale_fit(raw_sum, tb_amt, self.tolerance_abs, self.tolerance_pct)
+                        if fit:
+                            scale_f,sign_f,_=fit
+                            sub_amt3=raw_sum*scale_f*sign_f
+                            diff3=tb_amt-sub_amt3
                             suggestions.append({
                                 'bs_mapping':label,'group':gname,'subgroup':None if cname=='(Direct)' else cname,
-                                'currency':ccy,'tb_amount':tb_amt,'suggested_submission_amount':sub_amt2,'difference':diff2,
-                                'sign_applied':resolved_sign,
-                                'confidence':round(min(best_score,best_sub_score if best_sub_score else best_score)*0.9,2),
-                                'match_basis':{'section_match':best_top,'subgroup_match':best_sub,'used_total_rows':False,
-                                                'auto_clubbed':True,'excluded_lines':len(matches)-len(chosen2)},
-                                'rule_type':'AUTO_CLUB_SUBSET',
+                                'currency':ccy,'tb_amount':tb_amt,'suggested_submission_amount':sub_amt3,'difference':diff3,
+                                'sign_applied':sign_f,'scale_applied':scale_f,
+                                'confidence':round(min(best_score,best_sub_score if best_sub_score else best_score)*0.85,2),
+                                'match_basis':{'section_match':best_top,'subgroup_match':best_sub,'used_total_rows':bool(totals),
+                                                'scale_detected':scale_f},
+                                'rule_type':'AUTO_SCALE_ADJUST',
                                 'components':[{'submission_file':r['submission_file'],'sheet':r['sheet'],'row_number':r['row_number'],
                                                'source_cell':r['source_cell'],'line_description':r['line_description'],'currency':r['currency'],
-                                               'amount':r['normalized_amount'],'multiplier':1,'sign':resolved_sign} for r in chosen2]
+                                               'amount':r['normalized_amount'],'multiplier':scale_f,'sign':sign_f} for r in chosen]
                             })
+
+                    if ccy!='TOTAL' and not totals and out_of_tolerance and len(matches)>1:
+                        for scale_try in (1.0,)+SCALE_CANDIDATES:
+                            combo_idx=self.find_submission_subset(matches, tb_amt*resolved_sign, self.tolerance_abs, self.tolerance_pct, scale=scale_try)
+                            if combo_idx and len(combo_idx)<len(matches):
+                                chosen2=[matches[i] for i in combo_idx]
+                                sub_amt2=sum(r['normalized_amount'] for r in chosen2)*scale_try*resolved_sign
+                                diff2=tb_amt-sub_amt2
+                                basis={'section_match':best_top,'subgroup_match':best_sub,'used_total_rows':False,
+                                       'auto_clubbed':True,'excluded_lines':len(matches)-len(chosen2)}
+                                if scale_try!=1.0: basis['scale_detected']=scale_try
+                                suggestions.append({
+                                    'bs_mapping':label,'group':gname,'subgroup':None if cname=='(Direct)' else cname,
+                                    'currency':ccy,'tb_amount':tb_amt,'suggested_submission_amount':sub_amt2,'difference':diff2,
+                                    'sign_applied':resolved_sign,'scale_applied':scale_try,
+                                    'confidence':round(min(best_score,best_sub_score if best_sub_score else best_score)*(0.9 if scale_try==1.0 else 0.8),2),
+                                    'match_basis':basis,
+                                    'rule_type':'AUTO_CLUB_SUBSET' if scale_try==1.0 else 'AUTO_CLUB_SUBSET_SCALED',
+                                    'components':[{'submission_file':r['submission_file'],'sheet':r['sheet'],'row_number':r['row_number'],
+                                                   'source_cell':r['source_cell'],'line_description':r['line_description'],'currency':r['currency'],
+                                                   'amount':r['normalized_amount'],'multiplier':scale_try,'sign':resolved_sign} for r in chosen2]
+                                })
+                                break  # first (smallest-scale, preferring unscaled) fit wins
         suggestions.sort(key=lambda s: (-s['confidence'], s['bs_mapping']))
         return suggestions
 
@@ -536,6 +588,24 @@ class ReconEngine:
                                     'match_confidence':round(best_score,3)})
             if best_score<0.85:
                 warnings.append(f"Submission item matched with moderate confidence ({best_score:.2f}): {text!r} → {row.line_description!r}")
+
+        # the new period's submission file might not carry the same reporting
+        # scale as when this mapping was first built (or the scale was never
+        # in the header text to begin with) — check numerically before
+        # reporting a variance that's really just a unit mismatch.
+        tb_sum=sum(c['amount']*c.get('sign',1) for c in tb_components)
+        sub_raw_sum=sum(c['amount']*c.get('sign',1) for c in sub_components)
+        if tb_components and sub_components:
+            fit=self.best_scale_fit(sub_raw_sum, tb_sum, self.tolerance_abs, self.tolerance_pct)
+            if fit:
+                scale_f,sign_f,_=fit
+                if scale_f!=1.0 or sign_f!=1.0:
+                    for c in sub_components:
+                        c['multiplier']=c.get('multiplier',1)*scale_f
+                        c['sign']=c.get('sign',1)*sign_f
+                    warnings.append(f"Submission values didn't reconcile at face value; applied a "
+                                     f"{'×' if scale_f>=1 else '÷'}{scale_f if scale_f>=1 else round(1/scale_f)} scale"
+                                     f"{' and a sign flip' if sign_f<0 else ''} automatically — please double-check.")
 
         resolved={'bs_mapping':template.get('label') or 'Imported match','label':template.get('label'),
                   'currency':template.get('currency','TOTAL'),'rule_type':template.get('rule_type','MANUAL_CLUB'),

@@ -216,14 +216,23 @@ function renderSuggestionSummary(){
     ['TB groups covered',groups.size],['Avg confidence',accepted.length?Math.round(100*accepted.reduce((a,s)=>a+s.confidence,0)/accepted.length)+'%':'—']
   ].map(([k,v])=>`<div class="kpi"><small>${esc(k)}</small><b>${esc(v)}</b></div>`).join('');
 }
+function scaleLabel(scale){
+  if(!scale||scale===1) return null;
+  return scale>1 ? `×${fmt(scale)}` : `÷${fmt(1/scale)}`;
+}
 function renderSuggestions(){
   $('suggestions').innerHTML=state.suggestions.map((s,i)=>{
     const status = Math.abs(s.difference)<1e-6?'MATCH':(Math.abs(s.difference)<=1 || Math.abs(s.difference)/Math.max(Math.abs(s.tb_amount),1)<=0.0001?'MATCH_WITHIN_TOLERANCE':'REVIEW_REQUIRED');
-    const isClub = s.rule_type==='AUTO_CLUB_SUBSET';
-    return `<div class="suggestionCard ${state.suggestionDecisions[i]?'accepted':''} ${isClub?'clubCard':''}">
+    const isClub = s.rule_type==='AUTO_CLUB_SUBSET'||s.rule_type==='AUTO_CLUB_SUBSET_SCALED';
+    const isScaled = s.rule_type==='AUTO_SCALE_ADJUST'||s.rule_type==='AUTO_CLUB_SUBSET_SCALED';
+    const sLabel = scaleLabel(s.scale_applied);
+    return `<div class="suggestionCard ${state.suggestionDecisions[i]?'accepted':''} ${isClub||isScaled?'clubCard':''}">
       <div class="suggestionHead">
         <label class="acceptToggle"><input type="checkbox" data-action="toggle-suggestion" data-index="${i}" ${state.suggestionDecisions[i]?'checked':''}><span>Approve</span></label>
-        <div class="suggestionTitle"><b>${esc(s.bs_mapping)}</b><span class="chip">${esc(s.currency)}</span>${isClub?'<span class="chip chipClub">Auto-clubbed subset</span>':''}<span class="pill ${status}">${status}</span></div>
+        <div class="suggestionTitle"><b>${esc(s.bs_mapping)}</b><span class="chip">${esc(s.currency)}</span>
+          ${isClub?'<span class="chip chipClub">Auto-clubbed subset</span>':''}
+          ${isScaled?`<span class="chip chipClub">Scale-adjusted ${esc(sLabel)}</span>`:''}
+          <span class="pill ${status}">${status}</span></div>
         <span class="confidence">confidence ${Math.round(s.confidence*100)}%</span>
       </div>
       <div class="suggestionBody">
@@ -233,11 +242,12 @@ function renderSuggestions(){
           <div><small>Difference</small><b class="${status==='REVIEW_REQUIRED'?'bad':'good'}">${esc(fmt(s.difference))}</b></div>
           <div><small>Sign applied</small><b>${s.sign_applied<0?'Flipped (×-1)':'As reported'}</b></div>
         </div>
-        ${isClub?`<div class="matchWarnings" style="margin-top:10px">This is a narrower alternative to the blanket "sum every line" suggestion above for the same group — it excludes ${s.match_basis.excluded_lines} line(s) that didn't fit, because those specific ${s.components.length} line(s) reconcile to the TB figure. Approve at most one of the two for this group/currency.</div>`:''}
+        ${isClub?`<div class="matchWarnings" style="margin-top:10px">This is a narrower alternative to the blanket "sum every line" suggestion above for the same group — it excludes ${s.match_basis.excluded_lines} line(s) that didn't fit${isScaled?`, and reports the submission side ${esc(sLabel)} relative to what the sheet shows`:''}. Approve at most one of the two for this group/currency.</div>`
+          :(isScaled?`<div class="matchWarnings" style="margin-top:10px">The submission side didn't reconcile at face value, but does after applying ${esc(sLabel)} — the sheet's header didn't state a scale, so this was detected purely from the numbers. Double-check before approving.</div>`:'')}
         <details class="evidence"><summary>Match basis &amp; evidence (${s.components.length} line${s.components.length!==1?'s':''})</summary>
-          <div class="matchBasis muted">Section match: <b>${esc(s.match_basis.section_match||'—')}</b> · Sub-group match: <b>${esc(s.match_basis.subgroup_match||'—')}</b> · ${s.match_basis.used_total_rows?'Used pre‑computed Total rows':(isClub?`Auto-clubbed a subset of lines (excluded ${s.match_basis.excluded_lines})`:'Summed individual lines')}</div>
-          <table class="miniTable"><thead><tr><th>File</th><th>Sheet</th><th>Cell</th><th>Description</th><th>Amount</th></tr></thead>
-          <tbody>${s.components.map(c=>`<tr><td>${esc(c.submission_file)}</td><td>${esc(c.sheet)}</td><td>${esc(c.source_cell||c.row_number)}</td><td>${esc(c.line_description)}</td><td>${esc(fmt(c.amount))}</td></tr>`).join('')}</tbody></table>
+          <div class="matchBasis muted">Section match: <b>${esc(s.match_basis.section_match||'—')}</b> · Sub-group match: <b>${esc(s.match_basis.subgroup_match||'—')}</b> · ${s.match_basis.used_total_rows?'Used pre‑computed Total rows':(isClub?`Auto-clubbed a subset of lines (excluded ${s.match_basis.excluded_lines})`:'Summed individual lines')}${sLabel?` · Scale detected: ${esc(sLabel)}`:''}</div>
+          <table class="miniTable"><thead><tr><th>File</th><th>Sheet</th><th>Cell</th><th>Description</th><th>Sheet amount</th>${sLabel?'<th>Adjusted amount</th>':''}</tr></thead>
+          <tbody>${s.components.map(c=>`<tr><td>${esc(c.submission_file)}</td><td>${esc(c.sheet)}</td><td>${esc(c.source_cell||c.row_number)}</td><td>${esc(c.line_description)}</td><td>${esc(fmt(c.amount))}</td>${sLabel?`<td>${esc(fmt(c.amount*(c.multiplier||1)))}</td>`:''}</tr>`).join('')}</tbody></table>
         </details>
       </div>
     </div>`}).join('') || '<div class="notice">No candidate matches were generated. Build a manual match below.</div>';
@@ -290,11 +300,52 @@ function updateTbPickerSum(){
   const sel=[...state.tbSel].map(i=>state.tbItems[i]).filter(Boolean);
   if($('tbPickerCount')) $('tbPickerCount').textContent=sel.length+' selected';
   if($('tbPickerSum')) $('tbPickerSum').textContent=fmt(sel.reduce((a,it)=>a+it.amount,0));
+  updateMatchPreview();
 }
 function updateSubPickerSum(){
   const sel=[...state.subSel].map(i=>state.subPreview[i]).filter(Boolean);
   if($('subPickerCount')) $('subPickerCount').textContent=sel.length+' selected';
   if($('subPickerSum')) $('subPickerSum').textContent=fmt(sel.reduce((a,it)=>a+it.normalized_amount,0));
+  updateMatchPreview();
+}
+
+// common reporting-scale multipliers to check purely from the numbers —
+// mirrors bahrain_iraq_algorithm.engine.best_scale_fit. Lets the manual
+// builder catch "submission is quietly divided by 1000" even when nothing
+// in the sheet's header text said so.
+const SCALE_CANDIDATES=[1000,1000000,0.001,0.000001];
+function detectScale(tbSum,rawSubSum){
+  const tolAbs=+($('tolAbs')?.value||1), tolPct=+($('tolPct')?.value||0.0001);
+  const tol=v=>Math.max(tolAbs,Math.abs(v)*tolPct);
+  if(Math.abs(tbSum-rawSubSum)<=tol(tbSum)) return null; // already matches at face value
+  let best=null;
+  for(const scale of SCALE_CANDIDATES){
+    for(const sign of [1,-1]){
+      const v=rawSubSum*scale*sign;
+      const diff=Math.abs(tbSum-v);
+      if(diff<=tol(tbSum) && (!best||diff<best.diff)) best={scale,sign,diff};
+    }
+  }
+  return best;
+}
+function updateMatchPreview(){
+  const box=$('matchPreview'); if(!box) return;
+  const tbSel=[...state.tbSel].map(i=>state.tbItems[i]).filter(Boolean);
+  const subSel=[...state.subSel].map(i=>state.subPreview[i]).filter(Boolean);
+  if(!tbSel.length||!subSel.length){ box.innerHTML=''; return; }
+  const tbSum=tbSel.reduce((a,it)=>a+it.amount,0);
+  const rawSubSum=subSel.reduce((a,it)=>a+it.normalized_amount,0);
+  const fit=detectScale(tbSum,rawSubSum);
+  if(!fit){
+    const tolAbs=+($('tolAbs')?.value||1), tolPct=+($('tolPct')?.value||0.0001);
+    const tol=Math.max(tolAbs,Math.abs(tbSum)*tolPct);
+    const isMatch=Math.abs(tbSum-rawSubSum)<=tol;
+    box.innerHTML=isMatch
+      ? `<div class="notice good" style="margin:0 0 14px">✓ Values match directly — TB ${esc(fmt(tbSum))} vs submission ${esc(fmt(rawSubSum))}.</div>`
+      : '';
+  }else{
+    box.innerHTML=`<div class="notice" style="margin:0 0 14px">⚠ TB ${esc(fmt(tbSum))} vs submission ${esc(fmt(rawSubSum))} don't match directly, but submission ${esc(scaleLabel(fit.scale))}${fit.sign<0?' (sign flipped)':''} = ${esc(fmt(rawSubSum*fit.scale*fit.sign))} — this will be applied automatically when you add the match.</div>`;
+  }
 }
 function addManualMatch(){
   if(!state.tbSel.size||!state.subSel.size){toast('Select at least one item on each side');return}
@@ -305,12 +356,17 @@ function addManualMatch(){
   const ccySet=new Set(tbSelItems.map(it=>it.currency));
   const currency=ccySet.size===1?[...ccySet][0]:'TOTAL';
   if(ccySet.size>1) toast('Selected TB items span multiple currencies — compared as a combined TOTAL.');
+  const tbSum=tbSelItems.reduce((a,it)=>a+it.amount,0);
+  const rawSubSum=subSelItems.reduce((a,it)=>a+it.normalized_amount,0);
+  const fit=detectScale(tbSum,rawSubSum);
+  if(fit) toast(`Detected a ${scaleLabel(fit.scale)} scale mismatch${fit.sign<0?' (and a sign flip)':''} — applied automatically.`);
+  const scale=fit?fit.scale:1, signAdj=fit?fit.sign:1;
   const tb_components=tbSelItems.map(it=>({account:it.account,account_desc:it.account_desc,bs_mapping:it.bs_mapping,currency:it.currency,amount:it.amount,sign:1}));
   const components=subSelItems.map(it=>({submission_file:it.submission_file,sheet:it.sheet,row_number:it.row_number,source_cell:it.source_cell,
-    line_description:it.line_description,currency:it.currency,is_total:!!it.is_total,amount:it.normalized_amount,multiplier:1,sign:1}));
+    line_description:it.line_description,currency:it.currency,is_total:!!it.is_total,amount:it.normalized_amount,multiplier:scale,sign:signAdj}));
   state.manualMatches.push({bs_mapping:label,label,currency,rule_type:'MANUAL_CLUB',source:'MANUAL',tb_components,components,warnings:[]});
   state.tbSel.clear(); state.subSel.clear(); $('matchLabel').value='';
-  renderTbPicker(); renderSubPicker(); renderManualMatches();
+  renderTbPicker(); renderSubPicker(); renderManualMatches(); updateMatchPreview();
   toast('Manual match added');
 }
 function renderManualMatches(){
@@ -320,11 +376,15 @@ function renderManualMatches(){
     const diff=tbSum-subSum;
     const noEvidence=!(m.tb_components||[]).length && !(m.components||[]).length;
     const status=noEvidence?'UNRESOLVED':(Math.abs(diff)<1e-6?'MATCH':(Math.abs(diff)<=1||Math.abs(diff)/Math.max(Math.abs(tbSum),1)<=0.0001?'MATCH_WITHIN_TOLERANCE':'REVIEW_REQUIRED'));
+    const subScales=new Set((m.components||[]).map(c=>c.multiplier||1));
+    const appliedScale=subScales.size===1?[...subScales][0]:null;
+    const sLabel=scaleLabel(appliedScale);
     return `<div class="manualMatchCard ${(m.warnings&&m.warnings.length)?'hasWarning':''}">
       <div class="manualMatchHead">
         <b>${esc(m.label||m.bs_mapping)}</b>
         <span class="chip">${esc(m.currency)}</span>
         <span class="chip">${esc(m.source||'MANUAL')}</span>
+        ${sLabel?`<span class="chip chipClub">Scale ${esc(sLabel)} applied</span>`:''}
         <span class="pill ${status}">${status}</span>
         <button type="button" class="danger" data-action="remove-manual-match" data-index="${i}">Remove</button>
       </div>
