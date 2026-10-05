@@ -425,7 +425,7 @@ class ReconEngine:
                         best=(rank,combo)
         return best[1] if best else None
 
-    def best_scale_fit(self, raw_value, target, tolerance_abs, tolerance_pct, scales=SCALE_CANDIDATES):
+    def best_scale_fit(self, raw_value, target, tolerance_abs, tolerance_pct, scales=(1.0,)+SCALE_CANDIDATES):
         """Beyond whatever scale a column header's text implied at extraction
         time, check whether a common reporting-scale multiplier (thousands,
         millions, or the reverse) — together with a possible sign flip —
@@ -802,9 +802,11 @@ class ReconEngine:
                     for c in sub_components:
                         c['multiplier']=c.get('multiplier',1)*scale_f
                         c['sign']=c.get('sign',1)*sign_f
-                    warnings.append(f"Submission values didn't reconcile at face value; applied a "
-                                     f"{'×' if scale_f>=1 else '÷'}{scale_f if scale_f>=1 else round(1/scale_f)} scale"
-                                     f"{' and a sign flip' if sign_f<0 else ''} automatically — please double-check.")
+                    parts=[]
+                    if scale_f!=1.0: parts.append(f"a {'×' if scale_f>=1 else '÷'}{int(scale_f) if scale_f>=1 else round(1/scale_f)} scale")
+                    if sign_f<0: parts.append("a sign flip (values are equal and opposite)")
+                    warnings.append("Submission values didn't reconcile at face value; applied "
+                                    + " and ".join(parts) + " automatically — please double-check.")
 
         resolved={'bs_mapping':template.get('label') or 'Imported match','label':template.get('label'),
                   'currency':template.get('currency','TOTAL'),'rule_type':template.get('rule_type','MANUAL_CLUB'),

@@ -103,6 +103,7 @@ async function uploadTB(){
   const j=await api('/api/tb',{method:'POST',body:fd});
   state.pivot=j.preview; state.pivotCols=j.columns; state.tbTree=j.tree;
   state.localCcy=j.local_currency||'IQD';
+  if(j.engine_has_frx===false) toast('The bahrain_iraq_algorithm library in your project is out of date (no FRX* support) — copy the latest engine.py into it and restart the backend.');
   state.tbRaw=flattenTbItems(state.tbTree); state.tbItems=aggregateAccounts(state.tbRaw,state.acctView,null,true); state.tbSel=new Set();
   state.tbGroupItems=flattenTbGroups(state.tbTree); state.tbSelGroups=new Set();
   $('tbMessage').innerHTML=`<div class="notice good">Detected sheet <b>${esc(j.meta.sheet)}</b>, header row <b>${j.meta.header_row}</b>, ${j.meta.rows} data rows.</div>`;
@@ -466,7 +467,13 @@ function updateSubPickerSum(){
 // mirrors bahrain_iraq_algorithm.engine.best_scale_fit. Lets the manual
 // builder catch "submission is quietly divided by 1000" even when nothing
 // in the sheet's header text said so.
-const SCALE_CANDIDATES=[1000,1000000,0.001,0.000001];
+// 1 is included so a pure sign flip (e.g. a liability shown as -124,591,456 in the
+// TB and +124,591,456 in the submission) is recognised without any scale change.
+const SCALE_CANDIDATES=[1,1000,1000000,0.001,0.000001];
+function fitDescription(fit){
+  const parts=[]; if(fit.scale!==1) parts.push(`${scaleLabel(fit.scale)} scale`); if(fit.sign<0) parts.push('sign flipped');
+  return parts.join(' and ');
+}
 function detectScale(tbSum,rawSubSum){
   const tolAbs=+($('tolAbs')?.value||1), tolPct=+($('tolPct')?.value||0.0001);
   const tol=v=>Math.max(tolAbs,Math.abs(v)*tolPct);
@@ -509,7 +516,11 @@ function updateMatchPreview(){
       ? `<div class="notice good" style="margin:0 0 14px">✓ Values match directly — TB ${esc(fmt(tbSum))} vs submission ${esc(fmt(rawSubSum))}.</div>`
       : '';
   }else{
-    box.innerHTML=`<div class="notice" style="margin:0 0 14px">⚠ TB ${esc(fmt(tbSum))} vs submission ${esc(fmt(rawSubSum))} don't match directly, but submission ${esc(scaleLabel(fit.scale))}${fit.sign<0?' (sign flipped)':''} = ${esc(fmt(rawSubSum*fit.scale*fit.sign))} — this will be applied automatically when you add the match.</div>`;
+    if(fit.scale===1 && fit.sign<0){
+      box.innerHTML=`<div class="notice good" style="margin:0 0 14px">✓ Equal and opposite — TB ${esc(fmt(tbSum))} vs submission ${esc(fmt(rawSubSum))}. The submission side will be sign-flipped when you add the match.</div>`;
+      return;
+    }
+    box.innerHTML=`<div class="notice" style="margin:0 0 14px">⚠ TB ${esc(fmt(tbSum))} vs submission ${esc(fmt(rawSubSum))} don't match directly, but with the ${esc(fitDescription(fit))} the submission becomes ${esc(fmt(rawSubSum*fit.scale*fit.sign))} — this will be applied automatically when you add the match.</div>`;
   }
 }
 
@@ -588,7 +599,7 @@ function addManualMatch(){
   if(!hasPresets){
     const rawSubSum=subSelItems.reduce((a,it)=>a+it.normalized_amount,0);
     const fit=detectScale(tbSum,rawSubSum);
-    if(fit){ toast(`Detected a ${scaleLabel(fit.scale)} scale mismatch${fit.sign<0?' (and a sign flip)':''} — applied automatically.`); scale=fit.scale; signAdj=fit.sign; }
+    if(fit){ toast(`Detected ${fit.scale===1?'opposite signs':'a '+fitDescription(fit)} — applied automatically.`); scale=fit.scale; signAdj=fit.sign; }
   }
   const tb_components=tbSelItems.map(it=>({account:it.account,account_desc:it.account_desc,bs_mapping:it.bs_mapping,currency:it.currency,amount:it.amount,sign:1,...(it.breakdown?{breakdown:it.breakdown}:{})}));
   const components=subSelItems.map(it=>({submission_file:it.submission_file,sheet:it.sheet,row_number:it.row_number,source_cell:it.source_cell,
@@ -617,6 +628,7 @@ function renderManualMatches(){
         <span class="chip">${esc(ccyLabel(m.currency))}</span>
         <span class="chip">${esc(m.source||'MANUAL')}</span>
         ${sLabel?`<span class="chip chipClub">Scale ${esc(sLabel)} applied</span>`:''}
+        ${(m.components||[]).length&&(m.components||[]).every(c=>(c.sign||1)<0)?'<span class="chip chipClub" title="Submission values are equal and opposite to the Trial Balance (e.g. liabilities), so they were sign-flipped to reconcile">Sign flipped</span>':''}
         <span class="pill ${status}">${status}</span>
         <button type="button" class="danger" data-action="remove-manual-match" data-index="${i}">Remove</button>
       </div>
