@@ -3,7 +3,7 @@
    through addEventListener + event delegation, and every network call goes
    through api() which never lets a non-JSON / error response fail silently. */
 
-let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',
+let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',
   tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
   subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),subExtra:[],
   suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[],
@@ -102,7 +102,8 @@ async function uploadTB(){
   setStatus('Processing Trial Balance');
   const j=await api('/api/tb',{method:'POST',body:fd});
   state.pivot=j.preview; state.pivotCols=j.columns; state.tbTree=j.tree;
-  state.tbRaw=flattenTbItems(state.tbTree); state.tbItems=aggregateAccounts(state.tbRaw,state.acctView); state.tbSel=new Set();
+  state.localCcy=j.local_currency||'IQD';
+  state.tbRaw=flattenTbItems(state.tbTree); state.tbItems=aggregateAccounts(state.tbRaw,state.acctView,null,true); state.tbSel=new Set();
   state.tbGroupItems=flattenTbGroups(state.tbTree); state.tbSelGroups=new Set();
   $('tbMessage').innerHTML=`<div class="notice good">Detected sheet <b>${esc(j.meta.sheet)}</b>, header row <b>${j.meta.header_row}</b>, ${j.meta.rows} data rows.</div>`;
   $('kpis').innerHTML=Object.entries(j.kpis).map(([k,v])=>`<div class="kpi"><small>${esc(k.replace('_',' '))}</small><b>${esc(fmt(v))}</b></div>`).join('');
@@ -113,9 +114,11 @@ function renderPivot(){
   const rows=(state.pivot||[]).filter(r=>JSON.stringify(r).toLowerCase().includes(q));
   table('pivotTable',rows,(state.pivotCols||[]).map(c=>({key:c,label:c})));
 }
+// FRX is the synthetic "Forex" aggregate: every currency other than local (IQD)
+function ccyLabel(c){ return c==='FRX'?'FRX*':c; }
 function currencyChips(totals){
   if(!totals) return '';
-  return Object.entries(totals).filter(([k])=>k!=='TOTAL').map(([k,v])=>`<span class="chip">${esc(k)} ${esc(fmt(v))}</span>`).join('')+
+  return Object.entries(totals).filter(([k])=>k!=='TOTAL').map(([k,v])=>`<span class="chip${k==='FRX'?' chipClub':''}" ${k==='FRX'?'title="Forex: sub-total of every currency other than the local currency"':''}>${esc(ccyLabel(k))} ${esc(fmt(v))}</span>`).join('')+
     `<span class="chip chipTotal">TOTAL ${esc(fmt(totals.TOTAL))}</span>`;
 }
 function renderTbTree(){
@@ -312,17 +315,24 @@ function flattenTbItems(tree){
 // raw rows are kept in `members` and are what the reconciliation really uses.
 function normDesc(s){ return String(s==null?'':s).trim().toLowerCase().replace(/\s+/g,' '); }
 function rawAcctKey(a){ return [a.account,a.account_desc,a.currency,a.bs_mapping].join('|'); }
-function aggregateAccounts(rows,mode,amt){
+// withFrx (picker only): also emit a synthetic "FRX*" row per account = the
+// sub-total of all its non-local-currency lines. Picking it saves the mapping as
+// "all foreign currencies", so a currency that is new next period is still included.
+function aggregateAccounts(rows,mode,amt,withFrx){
   amt=amt||(r=>r.amount);
   const m=new Map();
-  (rows||[]).forEach(r=>{
-    const id=mode==='no'?String(r.account):(normDesc(r.account_desc)||('#'+r.account));
-    const k=id+'|'+r.currency+'|'+r.bs_mapping;
+  const add=(k,r,ccy,forex)=>{
     let g=m.get(k);
-    if(!g){ g={account:r.account,account_desc:r.account_desc,bs_mapping:r.bs_mapping,currency:r.currency,amount:0,members:[],accounts:[],descs:[]}; m.set(k,g); }
+    if(!g){ g={account:r.account,account_desc:r.account_desc,bs_mapping:r.bs_mapping,currency:ccy,forex:!!forex,amount:0,members:[],accounts:[],descs:[],ccys:[]}; m.set(k,g); }
     g.amount+=amt(r); g.members.push(r);
     if(!g.accounts.includes(r.account)) g.accounts.push(r.account);
     if(!g.descs.includes(r.account_desc)) g.descs.push(r.account_desc);
+    if(!g.ccys.includes(r.currency)) g.ccys.push(r.currency);
+  };
+  (rows||[]).forEach(r=>{
+    const id=mode==='no'?String(r.account):(normDesc(r.account_desc)||('#'+r.account));
+    add(id+'|'+r.currency+'|'+r.bs_mapping,r,r.currency,false);
+    if(withFrx && r.currency!==state.localCcy) add(id+'|FRX|'+r.bs_mapping,r,'FRX',true);
   });
   return [...m.values()];
 }
@@ -355,8 +365,8 @@ function flattenTbGroups(tree){
     const nextPath = node.name==='(Direct)' ? path : path.concat([node.name]);
     const allAccounts=collectTbAccounts(node);
     Object.entries(node.currency_totals||{}).forEach(([ccy,amt])=>{
-      const accounts = ccy==='TOTAL' ? allAccounts : allAccounts.filter(a=>a.currency===ccy);
-      out.push({label:label||node.name,level:node.level,currency:ccy,amount:amt,accounts});
+      const accounts = ccy==='TOTAL' ? allAccounts : ccy==='FRX' ? allAccounts.filter(a=>a.currency!==state.localCcy) : allAccounts.filter(a=>a.currency===ccy);
+      out.push({label:label||node.name,level:node.level,currency:ccy,forex:ccy==='FRX',amount:amt,accounts});
     });
     (node.children||[]).forEach(c=>walk(c,nextPath));
   }
@@ -364,7 +374,7 @@ function flattenTbGroups(tree){
   return out;
 }
 function filteredIndexed(list,query){
-  const q=(query||'').toLowerCase();
+  const q=(query||'').toLowerCase().replace(/\*/g,'').trim();   // "frx*" finds the FRX rows
   const idx=list.map((it,i)=>({it,i}));
   return q?idx.filter(({it})=>JSON.stringify(it).toLowerCase().includes(q)):idx;
 }
@@ -372,15 +382,23 @@ function filteredIndexed(list,query){
 // (pivot) level into one deduped list of TB accounts, so a user can freely
 // mix "this whole group" with "plus this one extra account" in one match
 // without double-counting anything the group already covers.
+// Lines picked via an FRX* row are folded into one currency:'FRX' component per
+// account (and win over the same line picked as a plain USD/EUR row, so nothing
+// double-counts). That FRX component is what gets saved in a mapping.
 function collectSelectedTbAccounts(){
-  const map=new Map();
-  [...state.tbSel].map(i=>state.tbItems[i]).filter(Boolean).forEach(it=>{
-    it.members.forEach(a=>map.set(rawAcctKey(a),a));
+  const map=new Map(), frx=new Set();
+  const add=(rows,isFrx)=>rows.forEach(a=>{ const k=rawAcctKey(a); map.set(k,a); if(isFrx) frx.add(k); });
+  [...state.tbSel].map(i=>state.tbItems[i]).filter(Boolean).forEach(it=>add(it.members,it.forex));
+  [...state.tbSelGroups].map(i=>state.tbGroupItems[i]).filter(Boolean).forEach(g=>add(g.accounts,g.forex));
+  const out=[], fold=new Map();
+  map.forEach((a,k)=>{
+    if(!frx.has(k)){ out.push(a); return; }
+    const fk=[a.account,a.account_desc,a.bs_mapping].join('|');
+    let f=fold.get(fk);
+    if(!f){ f={account:a.account,account_desc:a.account_desc,bs_mapping:a.bs_mapping,currency:'FRX',forex:true,amount:0,breakdown:{}}; fold.set(fk,f); out.push(f); }
+    f.amount+=a.amount; f.breakdown[a.currency]=(f.breakdown[a.currency]||0)+a.amount;
   });
-  [...state.tbSelGroups].map(i=>state.tbGroupItems[i]).filter(Boolean).forEach(g=>{
-    g.accounts.forEach(a=>map.set(rawAcctKey(a),a));
-  });
-  return [...map.values()];
+  return out;
 }
 function renderTbPicker(){
   const list=$('tbPickerList'); if(!list) return;
@@ -396,13 +414,13 @@ function renderTbPicker(){
   list.innerHTML=shown.map(({it,i})=>isGroup?`
     <label class="pickerItem">
       <input type="checkbox" data-action="${action}" data-index="${i}" ${selSet.has(i)?'checked':''}>
-      <div class="pMeta"><div class="pTitle">${esc(it.label)} <span class="chip">${it.accounts.length} acct${it.accounts.length!==1?'s':''}</span></div><div class="pSub">BS Mapping group total (pivot level)</div></div>
-      <div class="pAmt">${esc(it.currency)} ${esc(fmt(it.amount))}</div>
+      <div class="pMeta"><div class="pTitle">${esc(it.label)} <span class="chip">${it.accounts.length} acct${it.accounts.length!==1?'s':''}</span>${it.forex?' <span class="chip chipClub">Forex</span>':''}</div><div class="pSub">${it.forex?`All non-${esc(state.localCcy)} currencies, re-totalled each time the mapping is applied`:'BS Mapping group total (pivot level)'}</div></div>
+      <div class="pAmt">${esc(ccyLabel(it.currency))} ${esc(fmt(it.amount))}</div>
     </label>`:`
     <label class="pickerItem">
       <input type="checkbox" data-action="${action}" data-index="${i}" ${selSet.has(i)?'checked':''}>
-      <div class="pMeta"><div class="pTitle">${esc(aggTitle(it,state.acctView))}${it.members.length>1?` <span class="chip">${it.members.length} lines${it.accounts.length>1?' · '+it.accounts.length+' accts':''}</span>`:''}</div><div class="pSub">${esc(it.bs_mapping)}${aggAccountsNote(it,state.acctView)?' · '+esc(aggAccountsNote(it,state.acctView)):''}</div></div>
-      <div class="pAmt">${esc(it.currency)} ${esc(fmt(it.amount))}</div>
+      <div class="pMeta"><div class="pTitle">${esc(aggTitle(it,state.acctView))}${it.members.length>1?` <span class="chip">${it.members.length} lines${it.accounts.length>1?' · '+it.accounts.length+' accts':''}</span>`:''}</div><div class="pSub">${esc(it.bs_mapping)}${aggAccountsNote(it,state.acctView)?' · '+esc(aggAccountsNote(it,state.acctView)):''}${it.forex?` · Forex: all non-${esc(state.localCcy)} (${esc(it.ccys.join(', '))} now)`:''}</div></div>
+      <div class="pAmt">${esc(ccyLabel(it.currency))} ${esc(fmt(it.amount))}</div>
     </label>`).join('') || `<div class="muted" style="padding:14px">${isGroup?'No BS Mapping groups yet':'No Trial Balance items yet'} — upload a Trial Balance first.</div>`;
   if(all.length>300) list.insertAdjacentHTML('beforeend',`<div class="muted" style="padding:8px 11px">Showing first 300 of ${all.length} — refine your search</div>`);
   updateTbPickerSum();
@@ -572,7 +590,7 @@ function addManualMatch(){
     const fit=detectScale(tbSum,rawSubSum);
     if(fit){ toast(`Detected a ${scaleLabel(fit.scale)} scale mismatch${fit.sign<0?' (and a sign flip)':''} — applied automatically.`); scale=fit.scale; signAdj=fit.sign; }
   }
-  const tb_components=tbSelItems.map(it=>({account:it.account,account_desc:it.account_desc,bs_mapping:it.bs_mapping,currency:it.currency,amount:it.amount,sign:1}));
+  const tb_components=tbSelItems.map(it=>({account:it.account,account_desc:it.account_desc,bs_mapping:it.bs_mapping,currency:it.currency,amount:it.amount,sign:1,...(it.breakdown?{breakdown:it.breakdown}:{})}));
   const components=subSelItems.map(it=>({submission_file:it.submission_file,sheet:it.sheet,row_number:it.row_number,source_cell:it.source_cell,
     line_description:it.line_description,currency:it.currency,is_total:!!it.is_total,amount:it.normalized_amount,
     multiplier:it._multiplier!=null?it._multiplier:scale,sign:it._sign!=null?it._sign:signAdj}));
@@ -596,7 +614,7 @@ function renderManualMatches(){
     return `<div class="manualMatchCard ${(m.warnings&&m.warnings.length)?'hasWarning':''}">
       <div class="manualMatchHead">
         <b>${esc(m.label||m.bs_mapping)}</b>
-        <span class="chip">${esc(m.currency)}</span>
+        <span class="chip">${esc(ccyLabel(m.currency))}</span>
         <span class="chip">${esc(m.source||'MANUAL')}</span>
         ${sLabel?`<span class="chip chipClub">Scale ${esc(sLabel)} applied</span>`:''}
         <span class="pill ${status}">${status}</span>
@@ -604,7 +622,8 @@ function renderManualMatches(){
       </div>
       <div class="matchSides">
         <div class="matchSide"><small>Trial Balance (${tbAgg.length}${tbAgg.length!==(m.tb_components||[]).length?' by '+(state.acctView==='no'?'account no.':'description')+' · '+(m.tb_components||[]).length+' lines':''})</small>
-          <ul>${tbAgg.map(g=>`<li title="${esc(g.accounts.join(', '))}"><span>${esc(aggTitle(g,state.acctView))}${g.members.length>1?` <span class="muted">(${g.members.length} lines${g.accounts.length>1?', '+g.accounts.length+' accts':''})</span>`:''}</span><b>${esc(fmt(g.amount))}</b></li>`).join('')||'<li class="muted">none resolved</li>'}</ul>
+          <ul>${tbAgg.map(g=>{ const bd={}; g.members.forEach(c=>Object.entries(c.breakdown||{}).forEach(([k,v])=>{bd[k]=(bd[k]||0)+v})); const bdTxt=Object.entries(bd).map(([k,v])=>`${k} ${fmt(v)}`).join(' + ');
+          return `<li title="${esc(g.accounts.join(', '))}${bdTxt?esc(' — FRX* = '+bdTxt):''}"><span>${g.currency==='FRX'?'<span class="chip chipClub">FRX*</span> ':''}${esc(aggTitle(g,state.acctView))}${g.members.length>1?` <span class="muted">(${g.members.length} lines${g.accounts.length>1?', '+g.accounts.length+' accts':''})</span>`:''}</span><b>${esc(fmt(g.amount))}</b></li>`}).join('')||'<li class="muted">none resolved</li>'}</ul>
           <div class="muted" style="margin-top:6px">Total: <b>${esc(fmt(tbSum))}</b></div>
         </div>
         <div class="matchArrow">=</div>
@@ -786,12 +805,14 @@ const CLICK_ACTIONS={
   'set-acct-view':(el)=>{
     if(el.dataset.view===state.acctView) return;
     // keep a pick only if every raw line behind it is still fully covered after re-aggregating
-    const pickedRaw=new Set(); [...state.tbSel].forEach(i=>(state.tbItems[i]?.members||[]).forEach(a=>pickedRaw.add(rawAcctKey(a))));
+    // FRX* picks and plain-currency picks are tracked apart so each comes back as itself
+    const pickedRaw=new Set(), pickedFrx=new Set();
+    [...state.tbSel].forEach(i=>{ const it=state.tbItems[i]; if(it) it.members.forEach(a=>(it.forex?pickedFrx:pickedRaw).add(rawAcctKey(a))); });
     state.acctView=el.dataset.view;
-    state.tbItems=aggregateAccounts(state.tbRaw,state.acctView);
-    const before=pickedRaw.size; state.tbSel=new Set();
-    state.tbItems.forEach((it,i)=>{ if(it.members.every(a=>pickedRaw.has(rawAcctKey(a)))) state.tbSel.add(i); });
-    const kept=new Set(); [...state.tbSel].forEach(i=>state.tbItems[i].members.forEach(a=>kept.add(rawAcctKey(a))));
+    state.tbItems=aggregateAccounts(state.tbRaw,state.acctView,null,true);
+    const before=pickedRaw.size+pickedFrx.size; state.tbSel=new Set();
+    state.tbItems.forEach((it,i)=>{ const src=it.forex?pickedFrx:pickedRaw; if(it.members.every(a=>src.has(rawAcctKey(a)))) state.tbSel.add(i); });
+    const kept=new Set(); [...state.tbSel].forEach(i=>{ const it=state.tbItems[i]; it.members.forEach(a=>kept.add((it.forex?'F:':'P:')+rawAcctKey(a))); });
     if(kept.size<before) toast('Some picks only partly covered the new grouping and were dropped — re-pick them.');
     renderTbPicker(); renderManualMatches();
   },

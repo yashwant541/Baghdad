@@ -8,6 +8,13 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter, column_index_from_string
 
+# Local (reporting) currency, and the synthetic "FRX" currency = every TB line
+# whose currency is NOT local. FRX is stored *by name* in mappings and re-totalled
+# on each resolve, so a foreign currency that first appears in a later period's TB
+# is included automatically.
+LOCAL_CCY = "IQD"
+FRX_CODE = "FRX"
+
 ALIASES = {
  "account": ["account", "gl account", "account no", "account number"],
  "account_desc": ["account desc", "account description", "gl description"],
@@ -136,6 +143,9 @@ def json_value(v):
     return str(v) if not isinstance(v,(str,int,float,bool)) else v
 
 class ReconEngine:
+    LOCAL_CCY = LOCAL_CCY
+    FRX_CODE = FRX_CODE
+
     def __init__(self, tolerance_abs=1.0, tolerance_pct=0.0001):
         self.tolerance_abs=float(tolerance_abs); self.tolerance_pct=float(tolerance_pct)
 
@@ -228,6 +238,10 @@ class ReconEngine:
     def make_pivot(self, tb):
         p=pd.pivot_table(tb,index=['bs_mapping','account','account_desc'],columns='tran_ccy',values='adjusted_balance',aggfunc='sum',fill_value=0,margins=True,margins_name='Grand Total').reset_index()
         p.columns=[str(c) for c in p.columns]
+        # FRX* = sub-total of every non-local currency column, shown just before Grand Total
+        foreign=[c for c in p.columns if c not in ('bs_mapping','account','account_desc','Grand Total',LOCAL_CCY)]
+        if foreign:
+            p.insert(list(p.columns).index('Grand Total'),FRX_CODE+'*',p[foreign].sum(axis=1))
         return p
 
     def build_tb_tree(self, tb):
@@ -252,6 +266,8 @@ class ReconEngine:
 
     def _currency_totals(self, df):
         out={str(k):float(v) for k,v in df.groupby('tran_ccy')['adjusted_balance'].sum().to_dict().items()}
+        foreign=df[df['tran_ccy']!=LOCAL_CCY]
+        if len(foreign): out[FRX_CODE]=float(foreign['adjusted_balance'].sum())
         out['TOTAL']=float(df['adjusted_balance'].sum())
         return out
 
@@ -579,6 +595,9 @@ class ReconEngine:
         grp_raw_ccy=tb.groupby(['bs_mapping','tran_ccy'])['adjusted_balance'].sum().to_dict()
         grp_hier_total=tb.groupby('_hier_key')['adjusted_balance'].sum().to_dict()
         grp_hier_ccy=tb.groupby(['_hier_key','tran_ccy'])['adjusted_balance'].sum().to_dict()
+        tb_foreign=tb[tb['tran_ccy']!=LOCAL_CCY]
+        grp_frx=tb_foreign.groupby('bs_mapping')['adjusted_balance'].sum().to_dict()
+        grp_hier_frx=tb_foreign.groupby('_hier_key')['adjusted_balance'].sum().to_dict()
         out=[]
         for rule in rules:
             bs=(rule.get('bs_mapping') or rule.get('label') or '').strip()
@@ -611,11 +630,14 @@ class ReconEngine:
                     amt=float(c.get('amount',0))*float(c.get('sign',1))
                     tb_amt+=amt
                     tb_evidence.append({'account':c.get('account'),'description':c.get('account_desc'),
-                                         'bs_mapping':c.get('bs_mapping'),'currency':c.get('currency'),'amount':amt})
+                                         'bs_mapping':c.get('bs_mapping'),'currency':c.get('currency'),'amount':amt,
+                                         **({'currency_breakdown':c['breakdown']} if c.get('breakdown') else {})})
             else:
                 tb_evidence=None
                 if ccy=='TOTAL':
                     tb_amt=float(grp_raw_total.get(bs, grp_hier_total.get(bs,0)))
+                elif ccy==FRX_CODE:
+                    tb_amt=float(grp_frx.get(bs, grp_hier_frx.get(bs,0)))
                 else:
                     tb_amt=float(grp_raw_ccy.get((bs,ccy), grp_hier_ccy.get((bs,ccy),0)))
 
@@ -659,6 +681,9 @@ class ReconEngine:
             # 'currency' (the older/simple case) use it for both.
             filter_ccy=item.get('source_currency') or item.get('currency')
             tag_ccy=item.get('currency')
+            # FRX = all non-local currencies, totalled fresh from whatever
+            # foreign-currency lines this TB has (see FRX_CODE).
+            is_frx=filter_ccy==FRX_CODE
             # description is the primary key, not the account number: chart-
             # of-accounts numbers get renumbered/reused across periods or
             # systems far more often than a line's own description changes.
@@ -667,7 +692,7 @@ class ReconEngine:
             cand=tb.iloc[0:0]
             if desc:
                 pool=tb[tb.bs_mapping==bsmap] if bsmap and (tb.bs_mapping==bsmap).any() else tb
-                if filter_ccy and (pool.tran_ccy==filter_ccy).any():
+                if filter_ccy and not is_frx and (pool.tran_ccy==filter_ccy).any():
                     pool=pool[pool.tran_ccy==filter_ccy]
                 scored=sorted(((text_similarity(desc,row.account_desc),idx) for idx,row in pool.iterrows()),
                               key=lambda x:-x[0])
@@ -683,14 +708,36 @@ class ReconEngine:
                     cand=tb.loc[tied]
             if not len(cand) and acct:
                 hit=tb[tb.account.astype(str).str.strip()==acct]
-                if filter_ccy and (hit.tran_ccy==filter_ccy).any(): hit=hit[hit.tran_ccy==filter_ccy]
+                if filter_ccy and not is_frx and (hit.tran_ccy==filter_ccy).any(): hit=hit[hit.tran_ccy==filter_ccy]
                 if len(hit): cand=hit
             if not len(cand):
                 warnings.append(f"TB item not found: account={acct or '—'!s} description={desc or '—'!s}")
                 continue
+            if is_frx:
+                # the account/description exists; keep only its foreign lines. Having none
+                # this period is a genuine zero FRX balance, not a missing item.
+                any_row=cand.iloc[0]
+                cand=cand[cand.tran_ccy!=LOCAL_CCY]
+                if not len(cand):
+                    k=(any_row.account,any_row.account_desc,any_row.bs_mapping)
+                    if not any(c.get('currency')==FRX_CODE and (c['account'],c['account_desc'],c['bs_mapping'])==k for c in tb_components):
+                        tb_components.append({'account':any_row.account,'account_desc':any_row.account_desc,'bs_mapping':any_row.bs_mapping,
+                                               'currency':FRX_CODE,'amount':0.0,'sign':item.get('sign',1),'breakdown':{}})
+                    continue
             for idx,row in cand.iterrows():
                 if idx in used_tb_rows: continue  # two template items must not count the same TB line twice
                 used_tb_rows.add(idx)
+                if is_frx:
+                    # one FRX component per account, summing all its foreign currencies
+                    comp=next((c for c in tb_components if c.get('currency')==FRX_CODE and
+                               (c['account'],c['account_desc'],c['bs_mapping'])==(row.account,row.account_desc,row.bs_mapping)),None)
+                    if comp is None:
+                        comp={'account':row.account,'account_desc':row.account_desc,'bs_mapping':row.bs_mapping,
+                              'currency':FRX_CODE,'amount':0.0,'sign':item.get('sign',1),'breakdown':{}}
+                        tb_components.append(comp)
+                    comp['amount']+=float(row.adjusted_balance)
+                    comp['breakdown'][str(row.tran_ccy)]=comp['breakdown'].get(str(row.tran_ccy),0.0)+float(row.adjusted_balance)
+                    continue
                 tb_components.append({'account':row.account,'account_desc':row.account_desc,'bs_mapping':row.bs_mapping,
                                        'currency':tag_ccy or row.tran_ccy,'amount':float(row.adjusted_balance),'sign':item.get('sign',1)})
 

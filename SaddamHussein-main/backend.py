@@ -63,7 +63,7 @@ def upload_tb():
     path=save_upload(f,d,'tb'); eng=ReconEngine(); tb,meta=eng.load_tb(path,request.form.get('sheet') or None,request.form.get('header_row') or None)
     pivot=eng.make_pivot(tb); tree=eng.build_tb_tree(tb)
     d.update(tb_path=path,tb=tb,pivot=pivot,tb_tree=tree)
-    return jsonify({'ok':True,'session_id':sid,'meta':meta,
+    return jsonify({'ok':True,'session_id':sid,'meta':meta,'local_currency':eng.LOCAL_CCY,
                     'kpis':{'rows':len(tb),'groups':int(tb.bs_mapping.nunique()),'currencies':int(tb.tran_ccy.nunique()),
                             'balance':float(tb.adjusted_balance.sum()),'unmapped':int((tb.bs_mapping=='').sum())},
                     'preview':json.loads(pivot.head(20000).to_json(orient='records')),'columns':pivot.columns.tolist(),
