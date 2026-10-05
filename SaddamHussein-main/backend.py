@@ -1,6 +1,6 @@
 import os, sys, json, uuid, tempfile, traceback
 from pathlib import Path
-from flask import request, jsonify, send_file
+from flask import request, jsonify, Response
 
 HERE=os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
 if HERE not in sys.path: sys.path.insert(0,HERE)
@@ -14,6 +14,13 @@ def get_session(sid=None):
                                'tb_tree':None,'sub_files':[],'sub_inspect':{},'sub_df':None,'suggestions':None,
                                'rules':[],'recon':None,'lineage':None})
     return sid,d
+
+# send_file's filename kwarg was renamed (attachment_filename -> download_name) in Flask 2.0,
+# so build the attachment response by hand to work on any Flask version Dataiku ships.
+def xlsx_response(path,filename):
+    with open(path,'rb') as fh: data=fh.read()
+    return Response(data,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={'Content-Disposition':'attachment; filename="%s"'%filename,'Content-Length':str(len(data))})
 
 def save_upload(f,d,prefix):
     name=Path(f.filename or prefix+'.xlsx').name; path=os.path.join(d['dir'],prefix+'_'+name); f.save(path); return path
@@ -151,7 +158,7 @@ def submissions_export():
     eng=ReconEngine()
     path=os.path.join(d['dir'],'Submissions_Simplified.xlsx')
     eng.export_submissions(d['sub_df'],path)
-    return send_file(path,as_attachment=True,download_name='Submissions_Simplified.xlsx')
+    return xlsx_response(path,'Submissions_Simplified.xlsx')
 
 @app.route('/api/rules/resolve',methods=['POST','OPTIONS'])
 def rules_resolve():
@@ -210,4 +217,4 @@ def download():
     flat_lineage=eng.flatten_lineage(d['lineage']) if d.get('lineage') else None
     path=os.path.join(d['dir'],'Bahrain_Iraq_Reconciliation_Output.xlsx')
     eng.export(d['tb'],d['pivot'],d['sub_df'],d['recon'],d.get('suggestions'),flat_lineage,path,mapping_coverage=d.get('mapping_coverage'))
-    return send_file(path,as_attachment=True,download_name='Bahrain_Iraq_Reconciliation_Output.xlsx')
+    return xlsx_response(path,'Bahrain_Iraq_Reconciliation_Output.xlsx')
