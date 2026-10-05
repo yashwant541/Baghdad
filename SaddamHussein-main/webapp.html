@@ -69,6 +69,12 @@
 <div class="title"><div><h2>Mapping Studio</h2><p>Review the engine's suggested matches, then build or import manual matches for anything it couldn't resolve.</p></div></div>
 
 <div class="notice">Nothing is reconciled automatically. Every suggestion and manual match below is explicit and reviewable; nothing runs until you press Run reconciliation.</div>
+<div class="viewSwitch"><span class="muted">Show &amp; club Trial Balance accounts by</span>
+  <div class="levelToggle" id="acctViewToggle">
+    <button type="button" class="levelBtn active" data-action="set-acct-view" data-view="desc">Account description</button>
+    <button type="button" class="levelBtn" data-action="set-acct-view" data-view="no">Account no.</button>
+  </div>
+</div>
 <div id="suggestionSummary" class="kpis"></div>
 <div id="suggestions"></div>
 

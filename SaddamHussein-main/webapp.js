@@ -3,7 +3,7 @@
    through addEventListener + event delegation, and every network call goes
    through api() which never lets a non-JSON / error response fail silently. */
 
-let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbItems:[],tbSel:new Set(),
+let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',
   tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
   subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),subExtra:[],
   suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[],
@@ -102,7 +102,7 @@ async function uploadTB(){
   setStatus('Processing Trial Balance');
   const j=await api('/api/tb',{method:'POST',body:fd});
   state.pivot=j.preview; state.pivotCols=j.columns; state.tbTree=j.tree;
-  state.tbItems=flattenTbItems(state.tbTree); state.tbSel=new Set();
+  state.tbRaw=flattenTbItems(state.tbTree); state.tbItems=aggregateAccounts(state.tbRaw,state.acctView); state.tbSel=new Set();
   state.tbGroupItems=flattenTbGroups(state.tbTree); state.tbSelGroups=new Set();
   $('tbMessage').innerHTML=`<div class="notice good">Detected sheet <b>${esc(j.meta.sheet)}</b>, header row <b>${j.meta.header_row}</b>, ${j.meta.rows} data rows.</div>`;
   $('kpis').innerHTML=Object.entries(j.kpis).map(([k,v])=>`<div class="kpi"><small>${esc(k.replace('_',' '))}</small><b>${esc(fmt(v))}</b></div>`).join('');
@@ -305,6 +305,39 @@ function flattenTbItems(tree){
   (tree||[]).forEach(walk);
   return out;
 }
+// The same account often appears several times in a TB: one description under
+// several account numbers, or one number carrying several descriptions. This
+// folds raw account rows into one row per account DESCRIPTION ('desc') or per
+// account NUMBER ('no'), summing amounts, for display and picking only — the
+// raw rows are kept in `members` and are what the reconciliation really uses.
+function normDesc(s){ return String(s==null?'':s).trim().toLowerCase().replace(/\s+/g,' '); }
+function rawAcctKey(a){ return [a.account,a.account_desc,a.currency,a.bs_mapping].join('|'); }
+function aggregateAccounts(rows,mode,amt){
+  amt=amt||(r=>r.amount);
+  const m=new Map();
+  (rows||[]).forEach(r=>{
+    const id=mode==='no'?String(r.account):(normDesc(r.account_desc)||('#'+r.account));
+    const k=id+'|'+r.currency+'|'+r.bs_mapping;
+    let g=m.get(k);
+    if(!g){ g={account:r.account,account_desc:r.account_desc,bs_mapping:r.bs_mapping,currency:r.currency,amount:0,members:[],accounts:[],descs:[]}; m.set(k,g); }
+    g.amount+=amt(r); g.members.push(r);
+    if(!g.accounts.includes(r.account)) g.accounts.push(r.account);
+    if(!g.descs.includes(r.account_desc)) g.descs.push(r.account_desc);
+  });
+  return [...m.values()];
+}
+function aggTitle(g,mode){
+  if(mode==='no'){
+    const extra=g.descs.length>1?` (+${g.descs.length-1} other name${g.descs.length>2?'s':''})`:'';
+    return `${g.account} — ${g.descs[0]||''}${extra}`;
+  }
+  return g.descs[0]||String(g.account);
+}
+function aggAccountsNote(g,mode){
+  if(mode==='no') return '';
+  const shown=g.accounts.slice(0,4).join(', ');
+  return 'acct '+shown+(g.accounts.length>4?` +${g.accounts.length-4} more`:'');
+}
 function collectTbAccounts(node){
   let out=(node.accounts||[]).slice();
   (node.children||[]).forEach(c=>{ out=out.concat(collectTbAccounts(c)); });
@@ -342,16 +375,17 @@ function filteredIndexed(list,query){
 function collectSelectedTbAccounts(){
   const map=new Map();
   [...state.tbSel].map(i=>state.tbItems[i]).filter(Boolean).forEach(it=>{
-    map.set(it.account+'|'+it.currency+'|'+it.bs_mapping,it);
+    it.members.forEach(a=>map.set(rawAcctKey(a),a));
   });
   [...state.tbSelGroups].map(i=>state.tbGroupItems[i]).filter(Boolean).forEach(g=>{
-    g.accounts.forEach(a=>map.set(a.account+'|'+a.currency+'|'+a.bs_mapping,a));
+    g.accounts.forEach(a=>map.set(rawAcctKey(a),a));
   });
   return [...map.values()];
 }
 function renderTbPicker(){
   const list=$('tbPickerList'); if(!list) return;
   document.querySelectorAll('#tbLevelToggle .levelBtn').forEach(b=>b.classList.toggle('active',b.dataset.level===state.tbLevel));
+  document.querySelectorAll('#acctViewToggle .levelBtn').forEach(b=>b.classList.toggle('active',b.dataset.view===state.acctView));
   const isGroup=state.tbLevel==='group';
   const source=isGroup?state.tbGroupItems:state.tbItems;
   const selSet=isGroup?state.tbSelGroups:state.tbSel;
@@ -367,7 +401,7 @@ function renderTbPicker(){
     </label>`:`
     <label class="pickerItem">
       <input type="checkbox" data-action="${action}" data-index="${i}" ${selSet.has(i)?'checked':''}>
-      <div class="pMeta"><div class="pTitle">${esc(it.account)} — ${esc(it.account_desc)}</div><div class="pSub">${esc(it.bs_mapping)}</div></div>
+      <div class="pMeta"><div class="pTitle">${esc(aggTitle(it,state.acctView))}${it.members.length>1?` <span class="chip">${it.members.length} lines${it.accounts.length>1?' · '+it.accounts.length+' accts':''}</span>`:''}</div><div class="pSub">${esc(it.bs_mapping)}${aggAccountsNote(it,state.acctView)?' · '+esc(aggAccountsNote(it,state.acctView)):''}</div></div>
       <div class="pAmt">${esc(it.currency)} ${esc(fmt(it.amount))}</div>
     </label>`).join('') || `<div class="muted" style="padding:14px">${isGroup?'No BS Mapping groups yet':'No Trial Balance items yet'} — upload a Trial Balance first.</div>`;
   if(all.length>300) list.insertAdjacentHTML('beforeend',`<div class="muted" style="padding:8px 11px">Showing first 300 of ${all.length} — refine your search</div>`);
@@ -558,6 +592,7 @@ function renderManualMatches(){
     const subScales=new Set((m.components||[]).map(c=>c.multiplier||1));
     const appliedScale=subScales.size===1?[...subScales][0]:null;
     const sLabel=scaleLabel(appliedScale);
+    const tbAgg=aggregateAccounts(m.tb_components||[],state.acctView,c=>c.amount*(c.sign||1));
     return `<div class="manualMatchCard ${(m.warnings&&m.warnings.length)?'hasWarning':''}">
       <div class="manualMatchHead">
         <b>${esc(m.label||m.bs_mapping)}</b>
@@ -568,8 +603,8 @@ function renderManualMatches(){
         <button type="button" class="danger" data-action="remove-manual-match" data-index="${i}">Remove</button>
       </div>
       <div class="matchSides">
-        <div class="matchSide"><small>Trial Balance (${(m.tb_components||[]).length})</small>
-          <ul>${(m.tb_components||[]).map(c=>`<li><span>${esc(c.account)} ${esc(c.account_desc)}</span><b>${esc(fmt(c.amount))}</b></li>`).join('')||'<li class="muted">none resolved</li>'}</ul>
+        <div class="matchSide"><small>Trial Balance (${tbAgg.length}${tbAgg.length!==(m.tb_components||[]).length?' by '+(state.acctView==='no'?'account no.':'description')+' · '+(m.tb_components||[]).length+' lines':''})</small>
+          <ul>${tbAgg.map(g=>`<li title="${esc(g.accounts.join(', '))}"><span>${esc(aggTitle(g,state.acctView))}${g.members.length>1?` <span class="muted">(${g.members.length} lines${g.accounts.length>1?', '+g.accounts.length+' accts':''})</span>`:''}</span><b>${esc(fmt(g.amount))}</b></li>`).join('')||'<li class="muted">none resolved</li>'}</ul>
           <div class="muted" style="margin-top:6px">Total: <b>${esc(fmt(tbSum))}</b></div>
         </div>
         <div class="matchArrow">=</div>
@@ -748,6 +783,18 @@ const CLICK_ACTIONS={
   'extract-subs':(el)=>guarded(el,extractSubs),
   'download-submissions':(el)=>guarded(el,downloadSubmissions),
   'set-tb-level':(el)=>{ state.tbLevel=el.dataset.level; renderTbPicker(); },
+  'set-acct-view':(el)=>{
+    if(el.dataset.view===state.acctView) return;
+    // keep a pick only if every raw line behind it is still fully covered after re-aggregating
+    const pickedRaw=new Set(); [...state.tbSel].forEach(i=>(state.tbItems[i]?.members||[]).forEach(a=>pickedRaw.add(rawAcctKey(a))));
+    state.acctView=el.dataset.view;
+    state.tbItems=aggregateAccounts(state.tbRaw,state.acctView);
+    const before=pickedRaw.size; state.tbSel=new Set();
+    state.tbItems.forEach((it,i)=>{ if(it.members.every(a=>pickedRaw.has(rawAcctKey(a)))) state.tbSel.add(i); });
+    const kept=new Set(); [...state.tbSel].forEach(i=>state.tbItems[i].members.forEach(a=>kept.add(rawAcctKey(a))));
+    if(kept.size<before) toast('Some picks only partly covered the new grouping and were dropped — re-pick them.');
+    renderTbPicker(); renderManualMatches();
+  },
   'select-all-tb':()=>{
     const source=state.tbLevel==='group'?state.tbGroupItems:state.tbItems;
     const selSet=state.tbLevel==='group'?state.tbSelGroups:state.tbSel;

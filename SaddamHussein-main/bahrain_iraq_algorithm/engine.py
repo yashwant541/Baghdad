@@ -645,6 +645,7 @@ class ReconEngine:
         hit is reported as a warning instead of silently dropped)."""
         warnings=[]
         tb_components=[]
+        used_tb_rows=set()
         for item in template.get('tb_side',[]) or []:
             acct=str(item.get('account') or '').strip()
             desc=str(item.get('account_desc') or '').strip()
@@ -676,7 +677,10 @@ class ReconEngine:
                     if len(tied)>1 and acct:
                         exact=[idx for idx in tied if str(tb.loc[idx,'account']).strip()==acct]
                         if exact: tied=exact
-                    cand=tb.loc[[tied[0]]]
+                    # every raw line sharing that description (and account, when the
+                    # template named one) belongs to the item — a TB carries many
+                    # postings per account, so taking only the first would undercount.
+                    cand=tb.loc[tied]
             if not len(cand) and acct:
                 hit=tb[tb.account.astype(str).str.strip()==acct]
                 if filter_ccy and (hit.tran_ccy==filter_ccy).any(): hit=hit[hit.tran_ccy==filter_ccy]
@@ -684,7 +688,9 @@ class ReconEngine:
             if not len(cand):
                 warnings.append(f"TB item not found: account={acct or '—'!s} description={desc or '—'!s}")
                 continue
-            for _,row in cand.iterrows():
+            for idx,row in cand.iterrows():
+                if idx in used_tb_rows: continue  # two template items must not count the same TB line twice
+                used_tb_rows.add(idx)
                 tb_components.append({'account':row.account,'account_desc':row.account_desc,'bs_mapping':row.bs_mapping,
                                        'currency':tag_ccy or row.tran_ccy,'amount':float(row.adjusted_balance),'sign':item.get('sign',1)})
 
