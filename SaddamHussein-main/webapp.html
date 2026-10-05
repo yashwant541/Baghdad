@@ -54,8 +54,8 @@
 </section>
 
 <section id="subs" class="page">
-<div class="title"><div><span class="kicker">Step 4</span><h2>Upload Submission Files</h2><p>Upload up to three workbooks, then choose exactly which sheets to read into the reconciliation.</p></div></div>
-<div class="upload"><input id="subFiles" type="file" accept=".xlsx,.xlsm" multiple><div class="uploadIcon"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div><h3>Select the submissions</h3><p>Assets, liabilities/capital, and other supporting submission (max 3)</p><button type="button" class="secondary" data-action="choose-subs">Choose files</button></div>
+<div class="title"><div><span class="kicker">Step 4</span><h2>Upload Submission Files</h2><p>Upload up to eight workbooks, then choose exactly which sheets to read into the reconciliation.</p></div></div>
+<div class="upload"><input id="subFiles" type="file" accept=".xlsx,.xlsm" multiple><div class="uploadIcon"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div><h3>Select the submissions</h3><p>Assets, liabilities/capital, and other supporting submissions (max 8)</p><button type="button" class="secondary" data-action="choose-subs">Choose files</button></div>
 <div class="actions"><button type="button" class="primary" id="btnUploadSubs" data-action="upload-subs">Inspect workbooks</button></div>
 <div id="subMessage"></div>
 <div id="sheetPicker"></div>
@@ -94,6 +94,11 @@
     <div class="pickerFoot">Selected total <b id="subPickerSum">0</b></div>
   </div>
 </div>
+<div class="amountSearchBar">
+  <button type="button" class="secondary" data-action="search-amount"><svg viewBox="0 0 24 24" class="btnIcon"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.3-4.3"/></svg> Search submissions for the TB selected total</button>
+  <span class="muted" id="amountSearchLabel">Select Trial Balance items first, then search for that total across every extracted sheet.</span>
+</div>
+<div id="amountSearchResults"></div>
 <div id="matchPreview"></div>
 <div class="actions" style="justify-content:space-between">
   <label style="flex:1">Match description <input id="matchLabel" placeholder="e.g. Cash &amp; balances (Assets) vs submission cash lines" style="width:100%"></label>

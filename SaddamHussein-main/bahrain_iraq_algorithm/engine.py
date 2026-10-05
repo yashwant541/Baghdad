@@ -819,6 +819,43 @@ class ReconEngine:
                     if isinstance(c.value,(int,float)): c.number_format='#,##0.00;[Red](#,##0.00);-'
         wb.save(path); return path
 
+    def search_amount(self, submissions, target, tolerance_abs=1.0, tolerance_pct=0.0001,
+                       scales=(1.0,1000.0,1000000.0,0.001,0.000001), signs=(1.0,-1.0)):
+        """Reverse lookup: given a number (typically a TB-side club's total),
+        find every submission line whose value equals it — at face value, or
+        after a common scale factor and/or a sign flip — across every
+        sheet/file that's been extracted this session, not just whatever
+        happens to be visible in a filtered picker list. This is the
+        opposite direction from the usual "pick a TB item, see if it
+        reconciles" flow: build the club first, then search for its number.
+        """
+        if submissions is None or not len(submissions) or target is None:
+            return []
+        target=float(target)
+        tol=max(tolerance_abs, abs(target)*tolerance_pct)
+        out=[]
+        for idx,row in submissions.iterrows():
+            raw=float(row.normalized_amount)
+            if raw==0 and target!=0: continue
+            best=None
+            for scale in scales:
+                for sign in signs:
+                    v=raw*scale*sign
+                    diff=abs(target-v)
+                    if diff<=tol and (best is None or diff<best[0]):
+                        best=(diff,scale,sign)
+            if best:
+                diff,scale,sign=best
+                out.append({
+                    'submission_file':row.submission_file,'sheet':row.sheet,'row_number':int(row.row_number),
+                    'source_cell':row.source_cell,'line_description':row.line_description,
+                    'hierarchy_path':row.get('hierarchy_path',''),'currency':row.currency,
+                    'is_total':bool(row.is_total),'raw_amount':raw,'matched_value':raw*scale*sign,
+                    'scale':scale,'sign':sign,'difference':diff
+                })
+        out.sort(key=lambda r: abs(r['difference']))
+        return out
+
     def load_default_mapping(self):
         """A bundled, portable mapping (see resolve_rule_template) shipped
         alongside the engine so a known chart of accounts reconciles by

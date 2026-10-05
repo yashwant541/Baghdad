@@ -5,9 +5,10 @@
 
 let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbItems:[],tbSel:new Set(),
   tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
-  subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),
+  subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),subExtra:[],
   suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[],
-  mappingCoverage:[],mappingCoverageSummary:null,coverageFilter:'all'};
+  mappingCoverage:[],mappingCoverageSummary:null,coverageFilter:'all',
+  amountSearchResults:[],amountSearchAdded:new Set()};
 
 const $=id=>document.getElementById(id);
 
@@ -136,7 +137,7 @@ function renderTbTree(){
 
 async function uploadSubs(){
   const fs=[...$('subFiles').files]; if(!fs.length){toast('Choose submission files first');return}
-  const fd=new FormData(); fd.append('session_id',state.session); fs.slice(0,3).forEach(f=>fd.append('files',f));
+  const fd=new FormData(); fd.append('session_id',state.session); fs.slice(0,8).forEach(f=>fd.append('files',f));
   setStatus('Inspecting submission workbooks');
   const j=await api('/api/submissions/upload',{method:'POST',body:fd});
   state.subFilesMeta=j.files||[]; state.selection={};
@@ -216,9 +217,33 @@ async function extractSubs(){
   renderSuggestions(); renderSubPicker(); renderTbPicker(); renderManualMatches(); renderCoverage();
   setStatus('Submissions extracted'); go('mapping');
 }
-function downloadSubmissions(){
+// a plain `window.location = url` download works in a normal browser tab,
+// but Dataiku serves this webapp inside a sandboxed iframe, where top-level
+// navigation like that is commonly blocked outright (silently, or with a
+// console warning nobody sees) — "downloading nothing ever happens" is
+// exactly what that looks like. fetch + blob + a programmatic <a download>
+// click works inside a sandboxed iframe as long as downloads are allowed at
+// all, and — unlike a raw navigation — lets an error response show up as a
+// proper toast instead of navigating the whole app to a page of raw JSON.
+async function downloadFile(path,fallbackName){
+  const res=await fetch(backendUrl(path));
+  if(!res.ok){
+    let msg=`Download failed (status ${res.status})`;
+    try{ const data=await res.json(); if(data&&data.error) msg=data.error; }catch(e){}
+    throw new Error(msg);
+  }
+  const blob=await res.blob();
+  let filename=fallbackName;
+  const cd=res.headers.get('Content-Disposition');
+  if(cd){ const m=/filename\*?=(?:UTF-8'')?"?([^";]+)"?/.exec(cd); if(m) filename=decodeURIComponent(m[1]); }
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download=filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
+}
+async function downloadSubmissions(){
   if(!state.session){toast('No active session yet');return}
-  window.location=backendUrl('/api/submissions/export?session_id='+encodeURIComponent(state.session));
+  await downloadFile('/api/submissions/export?session_id='+encodeURIComponent(state.session),'Submissions_Simplified.xlsx');
 }
 
 /* ---------------- Mapping Studio: auto-suggestions ---------------- */
@@ -366,11 +391,21 @@ function updateTbPickerSum(){
   const pickCount=state.tbSel.size+state.tbSelGroups.size;
   if($('tbPickerCount')) $('tbPickerCount').textContent=pickCount+' selected'+(sel.length!==pickCount?` (${sel.length} accounts)`:'');
   if($('tbPickerSum')) $('tbPickerSum').textContent=fmt(sel.reduce((a,it)=>a+it.amount,0));
+  updateAmountSearchLabel();
   updateMatchPreview();
 }
+// combines the index-based submission picks with anything added from an
+// amount search (which can reference rows beyond the first 300 shown in
+// the picker's own filtered list, or even beyond the picker's search text
+// entirely — the search runs over every extracted row).
+function collectSelectedSubItems(){
+  const picked=[...state.subSel].map(i=>state.subPreview[i]).filter(Boolean);
+  return [...picked, ...state.subExtra];
+}
 function updateSubPickerSum(){
-  const sel=[...state.subSel].map(i=>state.subPreview[i]).filter(Boolean);
-  if($('subPickerCount')) $('subPickerCount').textContent=sel.length+' selected';
+  const sel=collectSelectedSubItems();
+  const pickCount=state.subSel.size+state.subExtra.length;
+  if($('subPickerCount')) $('subPickerCount').textContent=pickCount+' selected';
   if($('subPickerSum')) $('subPickerSum').textContent=fmt(sel.reduce((a,it)=>a+it.normalized_amount,0));
   updateMatchPreview();
 }
@@ -397,10 +432,22 @@ function detectScale(tbSum,rawSubSum){
 function updateMatchPreview(){
   const box=$('matchPreview'); if(!box) return;
   const tbSel=collectSelectedTbAccounts();
-  const subSel=[...state.subSel].map(i=>state.subPreview[i]).filter(Boolean);
+  const subSel=collectSelectedSubItems();
   if(!tbSel.length||!subSel.length){ box.innerHTML=''; return; }
   const tbSum=tbSel.reduce((a,it)=>a+it.amount,0);
-  const rawSubSum=subSel.reduce((a,it)=>a+it.normalized_amount,0);
+  const hasPresets=subSel.some(it=>it._multiplier!=null);
+  const rawSubSum=hasPresets
+    ? subSel.reduce((a,it)=>a+it.normalized_amount*(it._multiplier!=null?it._multiplier:1)*(it._sign!=null?it._sign:1),0)
+    : subSel.reduce((a,it)=>a+it.normalized_amount,0);
+  if(hasPresets){
+    const tolAbs=+($('tolAbs')?.value||1), tolPct=+($('tolPct')?.value||0.0001);
+    const tol=Math.max(tolAbs,Math.abs(tbSum)*tolPct);
+    const isMatch=Math.abs(tbSum-rawSubSum)<=tol;
+    box.innerHTML=isMatch
+      ? `<div class="notice good" style="margin:0 0 14px">✓ Values match — TB ${esc(fmt(tbSum))} vs submission ${esc(fmt(rawSubSum))} (using the scale/sign found by amount search).</div>`
+      : `<div class="notice" style="margin:0 0 14px">⚠ TB ${esc(fmt(tbSum))} vs submission ${esc(fmt(rawSubSum))} (after the amount-search transform) still don't agree — double-check before adding.</div>`;
+    return;
+  }
   const fit=detectScale(tbSum,rawSubSum);
   if(!fit){
     const tolAbs=+($('tolAbs')?.value||1), tolPct=+($('tolPct')?.value||0.0001);
@@ -413,26 +460,92 @@ function updateMatchPreview(){
     box.innerHTML=`<div class="notice" style="margin:0 0 14px">⚠ TB ${esc(fmt(tbSum))} vs submission ${esc(fmt(rawSubSum))} don't match directly, but submission ${esc(scaleLabel(fit.scale))}${fit.sign<0?' (sign flipped)':''} = ${esc(fmt(rawSubSum*fit.scale*fit.sign))} — this will be applied automatically when you add the match.</div>`;
   }
 }
+
+/* ---------------- Amount search: reverse lookup from a TB club's total
+   into every extracted submission line, across every sheet/file, not just
+   whatever's currently filtered in the picker. ---------------- */
+
+function updateAmountSearchLabel(){
+  const lbl=$('amountSearchLabel'); if(!lbl) return;
+  const tbSel=collectSelectedTbAccounts();
+  if(!tbSel.length){ lbl.textContent='Select Trial Balance items first, then search for that total across every extracted sheet.'; return; }
+  const sum=tbSel.reduce((a,it)=>a+it.amount,0);
+  lbl.textContent=`Will search for: ${fmt(sum)} (current TB selected total)`;
+}
+async function searchAmount(){
+  const tbSel=collectSelectedTbAccounts();
+  if(!tbSel.length){toast('Select Trial Balance items first');return}
+  if(!state.subPreview.length){toast('Extract submission sheets first');return}
+  const amount=tbSel.reduce((a,it)=>a+it.amount,0);
+  setStatus('Searching submissions for '+fmt(amount));
+  const j=await api('/api/submissions/search-amount',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:state.session,amount,tolerance_abs:+$('tolAbs').value||1,tolerance_pct:+$('tolPct').value||0.0001})});
+  state.amountSearchResults=j.results||[]; state.amountSearchAdded=new Set();
+  state.amountSearchTarget=amount; state.amountSearchTotalFound=j.total_found||0;
+  renderAmountSearchResults();
+  setStatus(state.amountSearchResults.length?`Found ${j.total_found} match(es)`:'No matches found');
+}
+function renderAmountSearchResults(){
+  const box=$('amountSearchResults'); if(!box) return;
+  if(!state.amountSearchResults.length){ box.innerHTML=''; return; }
+  const target=state.amountSearchTarget;
+  box.innerHTML=`<div class="notice good" style="margin-bottom:8px">Found ${state.amountSearchTotalFound} line(s) across all extracted sheets matching ${esc(fmt(target))}${state.amountSearchTotalFound>200?' (showing the closest 200)':''}.</div>`+
+    state.amountSearchResults.map((r,i)=>{
+      const added=state.amountSearchAdded.has(i);
+      const transform=[];
+      if(r.scale!==1) transform.push(scaleLabel(r.scale));
+      if(r.sign<0) transform.push('sign flipped');
+      const transformLabel=transform.length?transform.join(', '):'exact match';
+      return `<div class="searchResultRow ${added?'added':''}">
+        <div class="srMeta">
+          <div class="srTitle">${esc(r.line_description)}${r.is_total?' <span class="chip chipTotal">TOTAL</span>':''}</div>
+          <div class="srSub">${esc(r.submission_file)} · ${esc(r.sheet)} · ${esc(r.source_cell)} · ${esc(r.currency)} · ${esc(transformLabel)}</div>
+        </div>
+        <div class="srAmt">${esc(fmt(r.matched_value))}<small>sheet shows ${esc(fmt(r.raw_amount))}</small></div>
+        <button type="button" class="secondary" data-action="add-search-result" data-index="${i}" ${added?'disabled':''}>${added?'Added ✓':'+ Add'}</button>
+      </div>`;
+    }).join('');
+}
+function addSearchResultToMatch(i){
+  const r=state.amountSearchResults[i]; if(!r) return;
+  state.amountSearchAdded.add(i);
+  state.subExtra.push({
+    submission_file:r.submission_file,sheet:r.sheet,row_number:r.row_number,source_cell:r.source_cell,
+    line_description:r.line_description,currency:r.currency,is_total:r.is_total,
+    normalized_amount:r.raw_amount,_multiplier:r.scale,_sign:r.sign
+  });
+  renderAmountSearchResults(); updateSubPickerSum();
+  toast('Added to submission side of the match');
+}
 function addManualMatch(){
   const tbSelItems=collectSelectedTbAccounts();
-  if(!tbSelItems.length||!state.subSel.size){toast('Select at least one item on each side');return}
+  const subSelItems=collectSelectedSubItems();
+  if(!tbSelItems.length||!subSelItems.length){toast('Select at least one item on each side');return}
   const label=($('matchLabel').value||'').trim();
   if(!label){toast('Give this match a short description');return}
-  const subSelItems=[...state.subSel].map(i=>state.subPreview[i]);
   const ccySet=new Set(tbSelItems.map(it=>it.currency));
   const currency=ccySet.size===1?[...ccySet][0]:'TOTAL';
   if(ccySet.size>1) toast('Selected TB items span multiple currencies — compared as a combined TOTAL.');
   const tbSum=tbSelItems.reduce((a,it)=>a+it.amount,0);
-  const rawSubSum=subSelItems.reduce((a,it)=>a+it.normalized_amount,0);
-  const fit=detectScale(tbSum,rawSubSum);
-  if(fit) toast(`Detected a ${scaleLabel(fit.scale)} scale mismatch${fit.sign<0?' (and a sign flip)':''} — applied automatically.`);
-  const scale=fit?fit.scale:1, signAdj=fit?fit.sign:1;
+  // items added via amount search already carry the exact scale/sign that
+  // was found to match — trust those per-item rather than re-detecting a
+  // single uniform scale across everything selected, which would be wrong
+  // if a search-matched item is mixed in with plain, unscaled picks.
+  const hasPresets=subSelItems.some(it=>it._multiplier!=null);
+  let scale=1, signAdj=1;
+  if(!hasPresets){
+    const rawSubSum=subSelItems.reduce((a,it)=>a+it.normalized_amount,0);
+    const fit=detectScale(tbSum,rawSubSum);
+    if(fit){ toast(`Detected a ${scaleLabel(fit.scale)} scale mismatch${fit.sign<0?' (and a sign flip)':''} — applied automatically.`); scale=fit.scale; signAdj=fit.sign; }
+  }
   const tb_components=tbSelItems.map(it=>({account:it.account,account_desc:it.account_desc,bs_mapping:it.bs_mapping,currency:it.currency,amount:it.amount,sign:1}));
   const components=subSelItems.map(it=>({submission_file:it.submission_file,sheet:it.sheet,row_number:it.row_number,source_cell:it.source_cell,
-    line_description:it.line_description,currency:it.currency,is_total:!!it.is_total,amount:it.normalized_amount,multiplier:scale,sign:signAdj}));
+    line_description:it.line_description,currency:it.currency,is_total:!!it.is_total,amount:it.normalized_amount,
+    multiplier:it._multiplier!=null?it._multiplier:scale,sign:it._sign!=null?it._sign:signAdj}));
   state.manualMatches.push({bs_mapping:label,label,currency,rule_type:'MANUAL_CLUB',source:'MANUAL',tb_components,components,warnings:[]});
-  state.tbSel.clear(); state.tbSelGroups.clear(); state.subSel.clear(); $('matchLabel').value='';
-  renderTbPicker(); renderSubPicker(); renderManualMatches(); updateMatchPreview();
+  state.tbSel.clear(); state.tbSelGroups.clear(); state.subSel.clear(); state.subExtra=[]; state.amountSearchAdded=new Set();
+  state.amountSearchResults=[]; $('matchLabel').value='';
+  renderTbPicker(); renderSubPicker(); renderManualMatches(); renderAmountSearchResults(); updateMatchPreview();
   toast('Manual match added');
 }
 function renderManualMatches(){
@@ -618,9 +731,9 @@ function renderLineageTree(){
   $('lineageTree').innerHTML=(treeHtml+orphanHtml) || '<div class="muted">Run the reconciliation to build the map.</div>';
 }
 
-function downloadOutput(){
+async function downloadOutput(){
   if(!state.session){toast('No active session yet');return}
-  window.location=backendUrl('/api/download?session_id='+encodeURIComponent(state.session));
+  await downloadFile('/api/download?session_id='+encodeURIComponent(state.session),'Bahrain_Iraq_Reconciliation_Output.xlsx');
 }
 
 /* ---------------- event wiring (delegated — no inline handlers) ---------------- */
@@ -633,7 +746,7 @@ const CLICK_ACTIONS={
   'upload-tb':(el)=>guarded(el,uploadTB),
   'upload-subs':(el)=>guarded(el,uploadSubs),
   'extract-subs':(el)=>guarded(el,extractSubs),
-  'download-submissions':()=>downloadSubmissions(),
+  'download-submissions':(el)=>guarded(el,downloadSubmissions),
   'set-tb-level':(el)=>{ state.tbLevel=el.dataset.level; renderTbPicker(); },
   'select-all-tb':()=>{
     const source=state.tbLevel==='group'?state.tbGroupItems:state.tbItems;
@@ -650,11 +763,13 @@ const CLICK_ACTIONS={
   'select-all-sub':()=>{ filteredIndexed(state.subPreview,$('subPickerSearch')?.value).forEach(({i})=>state.subSel.add(i)); renderSubPicker(); },
   'clear-sub':()=>{ filteredIndexed(state.subPreview,$('subPickerSearch')?.value).forEach(({i})=>state.subSel.delete(i)); renderSubPicker(); },
   'add-manual-match':()=>addManualMatch(),
+  'search-amount':(el)=>guarded(el,searchAmount),
+  'add-search-result':(el)=>addSearchResultToMatch(+el.dataset.index),
   'remove-manual-match':(el)=>{state.manualMatches.splice(+el.dataset.index,1);renderManualMatches()},
   'download-mapping':()=>downloadMapping(),
   'apply-mapping':(el)=>guarded(el,applyMapping),
   'run-recon':(el)=>guarded(el,runRecon),
-  'download':()=>downloadOutput(),
+  'download':(el)=>guarded(el,downloadOutput),
   'coverage-filter':(el)=>{
     state.coverageFilter=el.dataset.filter;
     document.querySelectorAll('[data-action="coverage-filter"]').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.coverageFilter));

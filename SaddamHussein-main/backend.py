@@ -59,7 +59,7 @@ def upload_tb():
     return jsonify({'ok':True,'session_id':sid,'meta':meta,
                     'kpis':{'rows':len(tb),'groups':int(tb.bs_mapping.nunique()),'currencies':int(tb.tran_ccy.nunique()),
                             'balance':float(tb.adjusted_balance.sum()),'unmapped':int((tb.bs_mapping=='').sum())},
-                    'preview':json.loads(pivot.head(100).to_json(orient='records')),'columns':pivot.columns.tolist(),
+                    'preview':json.loads(pivot.head(20000).to_json(orient='records')),'columns':pivot.columns.tolist(),
                     'tree':tree})
 
 @app.route('/api/submissions/upload',methods=['POST','OPTIONS'])
@@ -68,7 +68,7 @@ def submissions_upload():
     if not fs:return jsonify({'ok':False,'error':'Upload at least one submission workbook.'}),400
     eng=ReconEngine(); d['sub_files']=[]; d['sub_inspect']={}
     out=[]
-    for i,f in enumerate(fs[:3],1):
+    for i,f in enumerate(fs[:8],1):
         path=save_upload(f,d,f'sub{i}'); label=Path(f.filename).name
         d['sub_files'].append({'label':label,'path':path})
         sheets=eng.inspect_workbook(path)
@@ -123,9 +123,26 @@ def submissions_extract():
              'tb_only':sum(1 for e in coverage if e['tb_found'] and not e['sub_found']),
              'sub_only':sum(1 for e in coverage if e['sub_found'] and not e['tb_found']),
              'neither':sum(1 for e in coverage if not e['tb_found'] and not e['sub_found'])}
-    return jsonify({'ok':True,'count':len(d['sub_df']),'preview':json.loads(preview.head(400).to_json(orient='records')),
+    # the manual match builder and amount search both need the FULL set of
+    # extracted lines to be useful — a 400-row cap here silently hid every
+    # line past that point (often an entire second/third uploaded file) from
+    # the picker even though it was correctly extracted underneath. 20,000
+    # is a safety net against a truly pathological file, not a real limit.
+    return jsonify({'ok':True,'count':len(d['sub_df']),'preview':json.loads(preview.head(20000).to_json(orient='records')),
                     'suggestions':d['suggestions'],'default_mapping_matches':default_matches,
                     'mapping_coverage':coverage,'mapping_coverage_summary':summary})
+
+@app.route('/api/submissions/search-amount',methods=['POST','OPTIONS'])
+def submissions_search_amount():
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    if d.get('sub_df') is None or not len(d['sub_df']):
+        return jsonify({'ok':False,'error':'Process submissions first.'}),400
+    amount=body.get('amount')
+    if amount is None:return jsonify({'ok':False,'error':'No amount given.'}),400
+    eng=ReconEngine()
+    results=eng.search_amount(d['sub_df'],amount,body.get('tolerance_abs',1),body.get('tolerance_pct',0.0001))
+    return jsonify({'ok':True,'results':results[:200],'total_found':len(results)})
 
 @app.route('/api/submissions/export',methods=['GET'])
 def submissions_export():
