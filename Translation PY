@@ -1,1 +1,693 @@
+import re
+import os
+import sys
+import warnings
+from copy import copy
+from tkinter import Tk, filedialog
 
+import csv
+import xlrd
+import pyxlsb
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Alignment, Font, PatternFill, Border, Side, numbers
+from openpyxl.utils import get_column_letter
+
+# ==========================================================
+# Ignore warning
+# ==========================================================
+
+warnings.filterwarnings(
+    "ignore",
+    message="Cannot parse header or footer so it will be ignored"
+)
+
+# ==========================================================
+# Arabic Detection
+# ==========================================================
+
+ARABIC_PATTERN = re.compile(
+    r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]'
+)
+
+ARABIC_WORD_PATTERN = re.compile(
+    r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]+'
+)
+
+def contains_arabic(text):
+    return isinstance(text, str) and bool(ARABIC_PATTERN.search(text))
+
+
+# ==========================================================
+# Dictionary Loader
+# ==========================================================
+
+def load_dictionary(dictionary_file):
+
+    wb = load_workbook(dictionary_file, data_only=True)
+    ws = wb.active
+
+    dictionary = {}
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+
+        if not row:
+            continue
+
+        source = row[0]
+        target = row[1] if len(row) > 1 else None
+
+        if source and target:
+
+            normalized_source = normalize_text(source)
+
+            dictionary[normalized_source] = str(target).strip()
+
+    return dictionary
+
+
+# ==========================================================
+# Merged Cell Helpers
+# ==========================================================
+
+def is_merged_child(ws, cell):
+
+    for merged_range in ws.merged_cells.ranges:
+
+        if cell.coordinate in merged_range:
+
+            master = ws.cell(
+                merged_range.min_row,
+                merged_range.min_col
+            )
+
+            return cell.coordinate != master.coordinate
+
+    return False
+
+
+def get_actual_value(ws, cell):
+
+    for merged_range in ws.merged_cells.ranges:
+
+        if cell.coordinate in merged_range:
+
+            return ws.cell(
+                merged_range.min_row,
+                merged_range.min_col
+            ).value
+
+    return cell.value
+
+
+# ==========================================================
+# Apply LTR ONLY to translated cells
+# ==========================================================
+
+def apply_ltr(cell):
+    cell.alignment = Alignment(
+        horizontal="left",
+        vertical="center",
+        wrap_text=False,
+        readingOrder=1,
+        indent=0
+    )
+
+
+def normalize_sheet_title(title):
+    """
+    Excel title constraints:
+    - Max length 31
+    - Invalid chars: : \\ / ? * [ ]
+    """
+
+    cleaned = re.sub(r'[:\\/?*\[\]]', ' ', str(title))
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+    if not cleaned:
+        cleaned = "Sheet"
+
+    return cleaned[:31]
+
+
+def make_unique_sheet_title(base_title, used_titles):
+    """
+    Ensure translated sheet names are unique within workbook.
+    """
+
+    candidate = base_title
+
+    if candidate not in used_titles:
+        return candidate
+
+    index = 2
+
+    while True:
+        suffix = f" ({index})"
+        trimmed = base_title[:31 - len(suffix)].rstrip()
+        candidate = f"{trimmed}{suffix}"
+
+        if candidate not in used_titles:
+            return candidate
+
+        index += 1
+
+
+def _quote_sheet_name(name):
+    return "'" + str(name).replace("'", "''") + "'"
+
+
+def update_formula_sheet_references(formula, title_map):
+    """
+    Rewrite formula sheet references after tab renaming.
+    Supports both quoted and unquoted sheet names.
+    """
+
+    if not isinstance(formula, str) or not formula.startswith("="):
+        return formula
+
+    updated = formula
+
+    for old_title, new_title in title_map.items():
+        if old_title == new_title:
+            continue
+
+        # Quoted: 'Old Name'!A1  ->  'New Name'!A1
+        old_quoted = _quote_sheet_name(old_title)
+        new_quoted = _quote_sheet_name(new_title)
+        updated = updated.replace(f"{old_quoted}!", f"{new_quoted}!")
+
+        # Unquoted: OldName!A1 -> NewName!A1
+        # Only safe for names without spaces/special chars.
+        if re.match(r'^[A-Za-z0-9_.]+$', old_title):
+            pattern = re.compile(r'(?<![A-Za-z0-9_\.])' + re.escape(old_title) + r'!')
+            updated = pattern.sub(f"{new_title}!", updated)
+
+    return updated
+
+
+# ==========================================================
+# Translation
+# ==========================================================
+
+def build_translation_pattern(dictionary):
+    """
+    Build ONE compiled regex that matches any dictionary key, but only
+    as a WHOLE word/phrase (never as a fragment inside another word).
+
+    Keys are ordered so longer phrases (more words, then more characters)
+    are tried before shorter ones, so multi-word phrases win over any
+    single word/letter that might also be a key.
+    """
+
+    if not dictionary:
+        return None
+
+    sorted_keys = sorted(
+        dictionary.keys(),
+        key=lambda k: (len(k.split()), len(k)),
+        reverse=True
+    )
+
+    joined = "|".join(re.escape(key) for key in sorted_keys)
+
+    # (?<!\w) / (?!\w) are Unicode-aware word boundaries: they treat
+    # Arabic letters as "word" characters, so a match can only start/end
+    # at whitespace, punctuation (including "-"), or string start/end.
+    return re.compile(r'(?<!\w)(?:' + joined + r')(?!\w)')
+
+
+def collapse_letter_hyphens(text):
+    """
+    Convert outputs like "t-r-a-n-s-l-a-t-i-o-n" into "translation".
+    """
+
+    if not isinstance(text, str) or "-" not in text:
+        return text
+
+    letter_chain = re.compile(r'\b(?:[A-Za-z]\s*-\s*){2,}[A-Za-z]\b')
+
+    return letter_chain.sub(
+        lambda m: re.sub(r'\s*-\s*', '', m.group(0)),
+        text
+    )
+
+
+def translate_text(text, dictionary, missing_terms):
+
+    original = str(text)
+
+    normalized_original = normalize_text(original)
+
+    # Exact match after normalization (whole cell matches a dictionary entry)
+    if normalized_original in dictionary:
+        return collapse_letter_hyphens(dictionary[normalized_original])
+
+    translated_parts = []
+    last_end = 0
+    translated_any = False
+
+    for match in ARABIC_WORD_PATTERN.finditer(original):
+        start, end = match.span()
+        arabic_word = match.group(0)
+
+        translated_parts.append(original[last_end:start])
+
+        normalized_word = normalize_text(arabic_word)
+
+        if normalized_word in dictionary:
+            translated_parts.append(dictionary[normalized_word])
+            translated_any = True
+        else:
+            translated_parts.append(arabic_word)
+            missing_terms.add(arabic_word)
+
+        last_end = end
+
+    translated_parts.append(original[last_end:])
+
+    if not translated_any:
+        return original
+
+    translated = ''.join(translated_parts)
+    translated = collapse_letter_hyphens(translated)
+
+    return translated
+
+
+# ==========================================================
+# Missing Words Report
+# ==========================================================
+
+def save_missing_terms(missing_terms, source_file):
+
+    wb = Workbook()
+    ws = wb.active
+
+    ws.title = "Missing Arabic Words"
+    ws["A1"] = "Arabic Text Not Found"
+
+    row = 2
+
+    for word in sorted(missing_terms):
+        ws.cell(row=row, column=1, value=word)
+        row += 1
+
+    missing_file = os.path.join(
+        os.path.dirname(source_file),
+        "Missing_Arabic_Words.xlsx"
+    )
+
+    wb.save(missing_file)
+
+    return missing_file
+
+# ==========================================================
+# Main Processing
+# ==========================================================
+
+# ==========================================================
+# XLS / XLSB  ->  openpyxl Workbook converter
+# ==========================================================
+
+# Border line-type index -> openpyxl border style name
+_XLS_BORDER_STYLES = {
+    0: None, 1: 'thin', 2: 'medium', 3: 'dashed',
+    4: 'dotted', 5: 'thick', 6: 'double', 7: 'hair',
+    8: 'mediumDashed', 9: 'dashDot', 10: 'mediumDashDot',
+    11: 'dashDotDot', 12: 'mediumDashDotDot', 13: 'slantDashDot',
+}
+_XLS_H_ALIGN = {0: 'general', 1: 'left', 2: 'center', 3: 'right',
+                4: 'fill', 5: 'justify', 6: 'centerContinuous', 7: 'distributed'}
+_XLS_V_ALIGN = {0: 'top', 1: 'center', 2: 'bottom', 3: 'justify', 4: 'distributed'}
+
+
+def _xls_rgb(colour_map, index):
+    rgb = colour_map.get(index)
+    if rgb:
+        return '{:02X}{:02X}{:02X}'.format(*rgb)
+    return None
+
+
+def _xls_side(line_type, colour_index, colour_map):
+    style = _XLS_BORDER_STYLES.get(line_type)
+    if not style:
+        return Side()
+    color = _xls_rgb(colour_map, colour_index) or '000000'
+    return Side(style=style, color=color)
+
+
+def _xls_to_openpyxl(source_file):
+    """Read an old-style .xls file with xlrd and return an openpyxl Workbook,
+    preserving fonts, fills, borders, alignment, merged cells, column widths
+    and row heights."""
+    xls_wb = xlrd.open_workbook(source_file, formatting_info=True)
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    for sheet_name in xls_wb.sheet_names():
+        xls_ws = xls_wb.sheet_by_name(sheet_name)
+        ws = wb.create_sheet(title=sheet_name[:31])
+
+        # ---- Merged cells ------------------------------------------------
+        for rlo, rhi, clo, chi in xls_ws.merged_cells:
+            ws.merge_cells(
+                start_row=rlo + 1, start_column=clo + 1,
+                end_row=rhi,       end_column=chi
+            )
+
+        # ---- Column widths -----------------------------------------------
+        for col_idx in range(xls_ws.ncols):
+            info = xls_ws.colinfo_map.get(col_idx)
+            if info and info.width:
+                ws.column_dimensions[get_column_letter(col_idx + 1)].width = info.width / 256
+
+        # ---- Row heights -------------------------------------------------
+        for row_idx in range(xls_ws.nrows):
+            info = xls_ws.rowinfo_map.get(row_idx)
+            if info and info.height:
+                ws.row_dimensions[row_idx + 1].height = info.height / 20  # twips -> pt
+
+        # ---- Cells -------------------------------------------------------
+        # Build a set of merged child coordinates so we can skip them
+        merged_children = set()
+        for merge in ws.merged_cells.ranges:
+            for r in range(merge.min_row, merge.max_row + 1):
+                for c in range(merge.min_col, merge.max_col + 1):
+                    if not (r == merge.min_row and c == merge.min_col):
+                        merged_children.add((r, c))
+
+        for row_idx in range(xls_ws.nrows):
+            for col_idx in range(xls_ws.ncols):
+                r, c = row_idx + 1, col_idx + 1
+                if (r, c) in merged_children:
+                    continue
+                cell    = xls_ws.cell(row_idx, col_idx)
+                ws_cell = ws.cell(row=r, column=c, value=cell.value)
+
+                xf_idx = cell.xf_index
+                if xf_idx is None:
+                    continue
+                xf = xls_wb.xf_list[xf_idx]
+
+                # Font
+                try:
+                    f = xls_wb.font_list[xf.font_index]
+                    fc = _xls_rgb(xls_wb.colour_map, f.colour_index) or '000000'
+                    ws_cell.font = Font(
+                        name=f.name,
+                        size=f.height / 20,
+                        bold=bool(f.bold),
+                        italic=bool(f.italic),
+                        underline='single' if f.underline_type else None,
+                        color=fc,
+                    )
+                except Exception:
+                    pass
+
+                # Fill
+                try:
+                    bg = xf.background
+                    if bg.pattern_type:
+                        fg_hex = _xls_rgb(xls_wb.colour_map, bg.pattern_colour_index)
+                        if fg_hex:
+                            ws_cell.fill = PatternFill(fill_type='solid', fgColor=fg_hex)
+                except Exception:
+                    pass
+
+                # Borders
+                try:
+                    b = xf.border
+                    ws_cell.border = Border(
+                        left   = _xls_side(b.left_line_type,   b.left_colour_index,   xls_wb.colour_map),
+                        right  = _xls_side(b.right_line_type,  b.right_colour_index,  xls_wb.colour_map),
+                        top    = _xls_side(b.top_line_type,    b.top_colour_index,    xls_wb.colour_map),
+                        bottom = _xls_side(b.bottom_line_type, b.bottom_colour_index, xls_wb.colour_map),
+                    )
+                except Exception:
+                    pass
+
+                # Alignment
+                try:
+                    a = xf.alignment
+                    ws_cell.alignment = Alignment(
+                        horizontal   = _XLS_H_ALIGN.get(a.hor_align, 'general'),
+                        vertical     = _XLS_V_ALIGN.get(a.vert_align, 'bottom'),
+                        wrap_text    = bool(a.text_wrapped),
+                        text_rotation= a.rotation,
+                    )
+                except Exception:
+                    pass
+
+                # Number format
+                try:
+                    fmt = xls_wb.format_map.get(xf.format_key)
+                    if fmt and fmt.format_str:
+                        ws_cell.number_format = fmt.format_str
+                except Exception:
+                    pass
+
+    return wb
+
+
+def _xlsb_to_openpyxl(source_file):
+    """Read a .xlsb binary workbook with pyxlsb and return an openpyxl Workbook.
+    pyxlsb exposes limited style information; values and basic structure are
+    preserved but full formatting may not carry over."""
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    with pyxlsb.open_workbook(source_file) as xlsb_wb:
+        for sheet_name in xlsb_wb.sheets:
+            ws = wb.create_sheet(title=sheet_name[:31])
+            with xlsb_wb.get_sheet(sheet_name) as xlsb_ws:
+                for row in xlsb_ws.rows():
+                    for cell in row:
+                        if cell.v is not None:
+                            ws.cell(row=cell.r, column=cell.c, value=cell.v)
+
+    return wb
+
+
+def process_workbook(source_file, dictionary_file):
+
+    print("Loading dictionary...")
+
+    dictionary = load_dictionary(dictionary_file)
+
+    print(f"Dictionary entries loaded: {len(dictionary)}")
+
+    ext = os.path.splitext(source_file)[1].lower()
+
+    if ext == ".xls":
+        print("Converting .xls to openpyxl workbook...")
+        wb = _xls_to_openpyxl(source_file)
+    elif ext == ".xlsb":
+        print("Converting .xlsb to openpyxl workbook...")
+        wb = _xlsb_to_openpyxl(source_file)
+    else:
+        wb = load_workbook(source_file)
+
+    missing_terms = set()
+
+    translated_count = 0
+    translated_sheet_names = 0
+    used_sheet_titles = set()
+    title_map = {}
+
+    for sheet_index, ws in enumerate(wb.worksheets, start=1):
+
+        original_title = ws.title
+
+        translated_title = translate_text(
+            original_title,
+            dictionary,
+            missing_terms
+        )
+
+        normalized_title = normalize_sheet_title(translated_title)
+        unique_title = make_unique_sheet_title(
+            normalized_title,
+            used_sheet_titles
+        )
+
+        title_map[original_title] = unique_title
+
+        if unique_title != original_title:
+            ws.title = unique_title
+            translated_sheet_names += 1
+
+        used_sheet_titles.add(ws.title)
+
+        print(f"Processing Sheet {sheet_index}")
+
+        # Keep worksheet LTR
+        ws.sheet_view.rightToLeft = False
+
+        for row in ws.iter_rows():
+
+            for cell in row:
+
+                # Skip merged child cells
+                if is_merged_child(ws, cell):
+                    continue
+
+                value = get_actual_value(ws, cell)
+
+                if value is None:
+                    continue
+
+                # Skip formulas
+                if isinstance(value, str) and value.startswith("="):
+                    continue
+
+                # Skip non-string cells
+                if not isinstance(value, str):
+                    continue
+
+                # IMPORTANT:
+                # Skip non-Arabic cells completely
+                if not contains_arabic(value):
+                    continue
+
+                translated_value = translate_text(
+                    value,
+                    dictionary,
+                    missing_terms
+                )
+
+                # Update only if actual translation happened
+                if translated_value != value:
+
+                    cell.value = translated_value
+
+                    # Apply LTR ONLY to translated Arabic cells
+                    apply_ltr(cell)
+
+                    translated_count += 1
+
+    # Update formulas to point to renamed sheets.
+    formula_updates = 0
+
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    new_formula = update_formula_sheet_references(
+                        cell.value,
+                        title_map
+                    )
+                    if new_formula != cell.value:
+                        cell.value = new_formula
+                        formula_updates += 1
+
+    file_name, src_ext = os.path.splitext(source_file)
+
+    # .xls and .xlsb cannot be written back by openpyxl; save as .xlsx instead
+    out_ext = ".xlsx" if src_ext.lower() in (".xls", ".xlsb") else src_ext
+    output_file = f"{file_name}_translated{out_ext}"
+
+    wb.save(output_file)
+
+    missing_file = save_missing_terms(
+    missing_terms,
+    source_file
+)
+
+    print("\nDone")
+    print(f"Translated Sheets: {translated_sheet_names}")
+    print(f"Translated Cells : {translated_count}")
+    print(f"Updated Formulas : {formula_updates}")
+    print(f"Missing Terms    : {len(missing_terms)}")
+    print(f"Output File      : {output_file}")
+    print(f"Missing File     : {missing_file}")
+
+def normalize_text(text):
+
+    if text is None:
+        return ""
+
+    text = str(text).strip()
+
+    # Remove bullets
+    text = text.replace("*", "")
+    text = text.replace("•", "")
+
+    # Remove tatweel
+    text = text.replace("ـ", "")
+
+    # Normalize Alef variants
+    text = text.replace("أ", "ا")
+    text = text.replace("إ", "ا")
+    text = text.replace("آ", "ا")
+    text = text.replace("ٱ", "ا")
+
+    # Normalize Ya
+    text = text.replace("ى", "ي")
+
+    # Normalize Ta Marbuta
+    text = text.replace("ة", "ه")
+
+    # Remove Arabic diacritics
+    text = re.sub(
+        r'[\u064B-\u065F\u0670\u06D6-\u06ED]',
+        '',
+        text
+    )
+
+    # Remove extra spaces
+    text = re.sub(r'\s+', ' ', text)
+
+    return text.strip()
+# ==========================================================
+# File Picker
+# ==========================================================
+
+def main():
+    import sys
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except:
+        pass
+
+    root = Tk()
+    root.withdraw()
+
+    source_file = filedialog.askopenfilename(
+        title="Select Excel File To Translate",
+        filetypes=[
+            ("Excel Files", "*.xlsx *.xlsm *.xls *.xlsb"),
+            ("All Files", "*.*")
+        ]
+    )
+
+    if not source_file:
+        print("No Excel file selected")
+        return
+
+    supported = {".xlsx", ".xlsm", ".xls", ".xlsb"}
+    if os.path.splitext(source_file)[1].lower() not in supported:
+        print(f"Unsupported file type: {os.path.splitext(source_file)[1]}")
+        print("Supported formats: .xlsx, .xlsm, .xls, .xlsb")
+        return
+
+    dictionary_file = filedialog.askopenfilename(
+        title="Select Dictionary File",
+        filetypes=[
+            ("Excel Files", "*.xlsx *.xlsm")
+        ]
+    )
+
+    if not dictionary_file:
+        print("No dictionary file selected")
+        return
+    
+
+    process_workbook(
+        source_file,
+        dictionary_file
+    )
+
+
+if __name__ == "__main__":
+    main()
