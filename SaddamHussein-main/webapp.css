@@ -278,7 +278,69 @@ tr:hover td{background:var(--surface-2)}
 .depthTable tr.conflict td{color:var(--muted);font-style:italic}
 .depthScroll{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:8px}
 .swatch{display:inline-block;width:16px;height:16px;border-radius:4px;border:1px solid rgba(0,0,0,.18);vertical-align:middle}
-.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.num{text-align:end;font-variant-numeric:tabular-nums;white-space:nowrap}
 .depthCard details{margin-top:10px}
 .depthCard summary{cursor:pointer;font-weight:700;font-size:13px}
 @media (max-width:900px){.depthSettings{grid-template-columns:1fr}}
+
+/* ---------- language switch, Arabic-content prompt, Off-balance pivots ---------- */
+.langSwitch{display:flex;gap:4px;margin:10px 0 0;padding:4px;background:#ffffff12;border-radius:12px}
+.langBtn{flex:1;border:0;background:transparent;color:var(--sidebar-ink);font-weight:700;font-size:12.5px;padding:8px 6px;border-radius:9px;cursor:pointer;font-family:inherit}
+.langBtn:hover{color:#fff}
+.langBtn.active{background:linear-gradient(135deg,var(--primary),#8b7bff);color:#fff;box-shadow:0 6px 16px -8px rgba(109,94,252,.9)}
+.langCard{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--primary);border-radius:var(--radius-lg);padding:20px 22px;margin:18px 0;box-shadow:var(--shadow-md)}
+.langCard h3{margin:0 0 8px;font-size:17px}
+.langCard p{margin:6px 0}
+.langOptions{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+.langOpt{display:flex;gap:12px;align-items:flex-start;border:1.5px solid var(--line);border-radius:var(--radius-md);padding:14px 16px;cursor:pointer;background:var(--surface-2)}
+.langOpt:has(input:checked){border-color:var(--primary);background:var(--primary-soft)}
+.langOpt input{margin-top:3px}
+.langOpt b{display:block;font-size:14px;margin-bottom:3px}
+.langOpt span{font-size:12.5px;color:var(--muted);line-height:1.45}
+.dictLabel{display:block;font-size:12px;font-weight:700;color:var(--muted);margin:6px 0}
+.dictRow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.dictRow input[type=file]{display:none}
+.obFilter{margin:8px 0 10px}
+.obFilter label{display:inline-flex;align-items:center;gap:10px;font-size:12.5px;font-weight:700;color:var(--muted)}
+.obValidation{margin-top:22px}
+.obValidation summary{cursor:pointer;font-weight:700;font-size:13px;margin-bottom:8px}
+#obPivot1 tr.obBold td,#obPivot2 tr.obBold td{font-weight:800;background:var(--surface-2)}
+#obPivot1 tr.obGrand td,#obPivot2 tr.obGrand td{border-top:2px solid var(--sidebar-1)}
+.negNum{color:#c0243f}
+@media(max-width:900px){.langOptions{grid-template-columns:1fr}}
+
+/* ---------- Arabic interface: right-to-left layout ---------- */
+html[lang="ar"] body,#app[dir="rtl"]{font-family:"Segoe UI",Tahoma,"Noto Sans Arabic","Noto Naskh Arabic",Arial,sans-serif}
+#app[dir="rtl"] .rail{left:auto;right:0}
+#app[dir="rtl"] main{margin-left:0;margin-right:252px}
+#app[dir="rtl"] th,#app[dir="rtl"] .miniTable th,#app[dir="rtl"] .depthTable th{text-align:right}
+#app[dir="rtl"] .notice,#app[dir="rtl"] .suggestionCard,#app[dir="rtl"] .manualMatchCard,#app[dir="rtl"] .langCard{border-left:0;border-right:4px solid var(--warning)}
+#app[dir="rtl"] .notice.good{border-right-color:var(--success)}
+#app[dir="rtl"] .suggestionCard{border-right-color:var(--line)}
+#app[dir="rtl"] .suggestionCard.accepted{border-right-color:var(--primary)}
+#app[dir="rtl"] .manualMatchCard{border-right-color:var(--teal)}
+#app[dir="rtl"] .manualMatchCard.hasWarning{border-right-color:var(--warning)}
+#app[dir="rtl"] .langCard{border-right-color:var(--primary)}
+#app[dir="rtl"] .treeChildren{border-left:0;border-right:2px dashed var(--line);padding:8px 22px 16px 16px;margin:0 20px 12px 16px}
+#app[dir="rtl"] .treeNode>summary::before,#app[dir="rtl"] .matchRow>summary::before{transform:rotate(135deg)}
+#app[dir="rtl"] .treeNode[open]>summary::before,#app[dir="rtl"] .matchRow[open]>summary::before{transform:rotate(45deg)}
+#app[dir="rtl"] .chip{margin:0 0 0 6px}
+#app[dir="rtl"] .nodeName{margin-right:0;margin-left:4px}
+#app[dir="rtl"] #toast{right:auto;left:28px}
+#app[dir="rtl"] .heroGlow{right:auto;left:-120px}
+#app[dir="rtl"] .mappingIO .secondary{margin-right:0;margin-left:8px}
+#app[dir="rtl"] .acctRow b,#app[dir="rtl"] .searchResultRow .srAmt{text-align:left}
+#app[dir="rtl"] .btnIcon{transform:scaleX(-1)}
+#app[dir="rtl"] .pAmt,#app[dir="rtl"] .num{direction:ltr;unicode-bidi:plaintext}
+#app[dir="rtl"] .stepLabel{white-space:normal}
+@media(max-width:980px){#app[dir="rtl"] main{margin-left:0;margin-right:76px}}
+
+/* wide tables must scroll inside their own box instead of widening the page (in right-to-left, the overflow would be unreachable) */
+main{min-width:0}
+@media(max-width:980px){
+  .langSwitch{flex-direction:column;padding:3px;margin-top:8px}
+  .langBtn{font-size:10.5px;padding:6px 2px;line-height:1.2}
+}
+
+/* file names and other Latin data inside the right-to-left layout keep their own reading order */
+#app[dir="rtl"] .depthFileRow b,#app[dir="rtl"] .fileCardHead b,#app[dir="rtl"] .depthCardHead b,#app[dir="rtl"] .sheetTitle,#app[dir="rtl"] .pTitle,#app[dir="rtl"] .srTitle{unicode-bidi:plaintext}

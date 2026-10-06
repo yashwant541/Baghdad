@@ -3,7 +3,7 @@
    through addEventListener + event delegation, and every network call goes
    through api() which never lets a non-JSON / error response fail silently. */
 
-let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',fileTypes:{},depth:null,
+let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',fileTypes:{},depth:null,workLang:null,outstanding:null,uiLang:'en',
   tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
   subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),subExtra:[],
   suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[],
@@ -65,8 +65,8 @@ function table(id,rows,cols){let t=$(id);if(!rows||!rows.length){t.innerHTML='<t
    and turns thrown errors into a visible toast instead of a silent no-op */
 async function guarded(el,fn){
   const busyBtn = el && el.tagName==='BUTTON' ? el : null;
-  let original;
-  if(busyBtn){ original=busyBtn.innerHTML; busyBtn.disabled=true; busyBtn.classList.add('isBusy'); }
+  // (the button's HTML is never swapped out, so the interface translator keeps its original English text)
+  if(busyBtn){ busyBtn.disabled=true; busyBtn.classList.add('isBusy'); }
   try{
     await fn();
   }catch(err){
@@ -74,7 +74,7 @@ async function guarded(el,fn){
     toast((err&&err.message)||String(err));
     setStatus('Error — see message',false);
   }finally{
-    if(busyBtn){ busyBtn.disabled=false; busyBtn.classList.remove('isBusy'); if(original!=null) busyBtn.innerHTML=original; }
+    if(busyBtn){ busyBtn.disabled=false; busyBtn.classList.remove('isBusy'); }
   }
 }
 
@@ -139,21 +139,126 @@ function renderTbTree(){
 
 /* ---------------- Submissions ---------------- */
 
+function initSelection(){
+  state.selection={};
+  state.subFilesMeta.forEach(f=>{ state.selection[f.file]={};
+    (f.sheets||[]).forEach(s=>{ state.selection[f.file][s.sheet]={checked: s.header_row!=null && s.score>=3, header_row: s.header_row}; }); });
+}
+function revealSheetPicker(){
+  renderSheetPicker();
+  $('extractActions').style.display='flex';
+  $('subDownloadRow').style.display='none';
+}
 async function uploadSubs(){
   const fs=[...$('subFiles').files]; if(!fs.length){toast('Choose submission files first');return}
   const fd=new FormData(); fd.append('session_id',state.session); fs.slice(0,8).forEach(f=>fd.append('files',f));
   setStatus('Inspecting submission workbooks');
   const j=await api('/api/submissions/upload',{method:'POST',body:fd});
-  state.subFilesMeta=j.files||[]; state.selection={};
-  state.subFilesMeta.forEach(f=>{ state.selection[f.file]={};
-    (f.sheets||[]).forEach(s=>{ state.selection[f.file][s.sheet]={checked: s.header_row!=null && s.score>=3, header_row: s.header_row}; }); });
+  state.subFilesMeta=j.files||[]; state.workLang=null;
+  initSelection();
   state.fileTypes={}; state.subFilesMeta.forEach(f=>{ state.fileTypes[f.file]=f.guessed_type||'any'; });
   state.depth=null; renderDepthFiles(); renderDepthResults();
-  renderSheetPicker();
-  $('extractActions').style.display='flex';
   $('subDownloadRow').style.display='none';
+  if(j.has_arabic){
+    // the submissions are (partly) Arabic: ask whether to translate or work in Arabic before showing any sheet
+    $('sheetPicker').innerHTML=''; $('extractActions').style.display='none';
+    $('subMessage').innerHTML='';
+    showLangChoice();
+    setStatus('Choose a working language');
+    return;
+  }
+  $('langChoice').style.display='none';
+  revealSheetPicker();
   $('subMessage').innerHTML=`<div class="notice good">Inspected ${state.subFilesMeta.length} workbook(s). Choose the sheets to read, then extract.</div>`;
   setStatus('Choose submission sheets');
+}
+function showLangChoice(){
+  const rows=state.subFilesMeta.filter(f=>f.arabic_cells||((f.arabic_sheets||[]).length));
+  $('langChoiceText').innerHTML=rows.map(f=>`<div><b>${esc(f.file)}</b> — ${esc(f.arabic_cells)} Arabic cell(s) in ${esc((f.arabic_sheets||[]).length)} sheet(s)${(f.arabic_sample||[]).length?` <span class="muted">(${esc(f.arabic_sample.slice(0,2).join(' · '))})</span>`:''}</div>`).join('');
+  document.querySelectorAll('input[name="workLang"]').forEach(r=>{ r.checked=false; });
+  $('dictBox').style.display='none'; $('dictName').textContent=''; $('dictFile').value='';
+  $('langChoice').style.display='block';
+}
+async function proceedLang(){
+  const sel=document.querySelector('input[name="workLang"]:checked');
+  if(!sel){toast('Choose Arabic or English first');return}
+  if(sel.value==='ar'){
+    await api('/api/submissions/language',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.session,mode:'ar'})});
+    state.workLang='ar'; $('langChoice').style.display='none'; revealSheetPicker();
+    $('subMessage').innerHTML='<div class="notice good">Working in Arabic — the submissions are used exactly as uploaded. Choose the sheets to read, then extract.</div>';
+    setStatus('Choose submission sheets');
+    return;
+  }
+  const f=$('dictFile').files[0]; if(!f){toast('Choose your dictionary workbook first');return}
+  const fd=new FormData(); fd.append('session_id',state.session); fd.append('dictionary',f);
+  setStatus('Translating the submissions to English');
+  const j=await api('/api/submissions/translate',{method:'POST',body:fd});
+  state.subFilesMeta=j.files||[]; initSelection(); state.workLang='en';
+  state.subFilesMeta.forEach(x=>{ if(!state.fileTypes[x.file]) state.fileTypes[x.file]=x.guessed_type||'any'; });
+  state.depth=null; renderDepthFiles(); renderDepthResults();
+  $('langChoice').style.display='none'; revealSheetPicker();
+  const cells=j.stats.reduce((a,x)=>a+x.translated_cells,0), sheets=j.stats.reduce((a,x)=>a+x.translated_sheets,0);
+  const dl=j.stats.filter(x=>!x.skipped).map(x=>`<button type="button" class="secondary" data-action="download-translated" data-file="${esc(x.file)}">Download ${esc(x.file)} (translated)</button>`).join(' ');
+  $('subMessage').innerHTML=`<div class="notice good">Translated ${cells} cell(s) and ${sheets} sheet name(s) using ${j.entries} dictionary entries. ${j.missing_count} Arabic term(s) were not in the dictionary — the English workbook is used from here on.
+    <div style="margin-top:10px">${j.missing_count?'<button type="button" class="secondary" data-action="download-missing">Download missing terms</button> ':''}${dl}</div></div>`;
+  setStatus('Choose submission sheets');
+}
+
+/* ---------------- Off-balance: the Outstanding Report and its two pivots ---------------- */
+
+async function uploadOutstanding(){
+  const f=$('obFile').files[0]; if(!f){toast('Choose the Outstanding Report workbook first');return}
+  const fd=new FormData(); fd.append('session_id',state.session); fd.append('file',f);
+  setStatus('Building the Outstanding Report pivots');
+  const j=await api('/api/outstanding/upload',{method:'POST',body:fd});
+  state.outstanding=j; state.depth=null; renderOutstanding(); renderDepthFiles(); renderDepthResults();
+  setStatus('Outstanding Report ready');
+}
+async function changeObCategory(value){
+  const j=await api('/api/outstanding/category',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:state.session,category:value})});
+  state.outstanding=j; state.depth=null; renderOutstanding(); renderDepthFiles(); renderDepthResults();
+}
+function obCell(v){
+  if(typeof v!=='number') return esc(v);
+  if(Math.abs(v)<0.005) return '-';
+  return v<0?`<span class="negNum">(${esc(fmt(Math.abs(v)))})</span>`:esc(fmt(v));
+}
+function renderObTable(id,flat){
+  const t=$(id); if(!t) return;
+  const nl=flat.label_cols.length;
+  const head='<thead><tr>'+flat.label_cols.concat(flat.columns).map(c=>`<th>${esc(c)}</th>`).join('')+'</tr></thead>';
+  const rank={'Category':0,'LC/GTEE':1,'Currency':2,'Grand Total':0};
+  const body=flat.rows.map(r=>{
+    const bold=r.level==='Category'||r.level==='Grand Total'||(r.level==='LC/GTEE'&&nl===3);
+    const labs=r.labels.map((l,i)=>nl===3?(i===rank[r.level]?l:''):l);
+    return `<tr class="${bold?'obBold':''} ${r.level==='Grand Total'?'obGrand':''}">`+labs.map(l=>`<td data-tr="1">${esc(l)}</td>`).join('')+
+      r.values.concat([r.total]).map(v=>`<td class="num">${obCell(v)}</td>`).join('')+'</tr>';
+  }).join('');
+  t.innerHTML=head+'<tbody>'+body+'</tbody>';
+}
+function renderOutstanding(){
+  const j=state.outstanding; if(!j) return;
+  const val={}; (j.validation||[]).forEach(([k,v])=>{ val[k]=v; });
+  $('obMessage').innerHTML=`<div class="notice good">Detected sheet <b>${esc(j.sheet)}</b>, header row <b>${esc(j.header_row)}</b> in <b>${esc(j.source)}</b>.</div>`+
+    (j.warnings||[]).map(w=>`<div class="notice">${esc(w)}</div>`).join('');
+  $('obKpis').innerHTML=[['Rows read',val['Source rows read']],['Detail rows',val['Cleaned detail rows']],
+    ['Invalid / blank Equ-IQD',(val['Rows with invalid / non-numeric Equ-IQD (excluded)']||0)+(val['Rows with blank Equ-IQD (excluded)']||0)],
+    ['Source total',val['Source Equ-IQD total (valid rows)']],['Difference',val['Reconciliation difference (source - Pivot 1)']]]
+    .map(([k,v])=>`<div class="kpi"><small>${esc(k)}</small><b>${esc(fmt(v))}</b></div>`).join('');
+  const sel=$('obCategory');
+  sel.innerHTML=['<option value="">All</option>'].concat((j.categories||[]).map(c=>`<option value="${esc(c)}" ${c===j.selected_category?'selected':''}>${esc(c)}</option>`)).join('');
+  renderObTable('obPivot1',j.pivot1); renderObTable('obPivot2',j.pivot2);
+  $('obValidation').innerHTML='<thead><tr><th>Check</th><th>Value</th></tr></thead><tbody>'+(j.validation||[]).map(([k,v])=>`<tr><td data-tr="1">${esc(k)}</td><td>${esc(typeof v==='number'?fmt(v):v)}</td></tr>`).join('')+'</tbody>';
+  $('obBody').style.display='block'; $('btnOutstandingDl').style.display='inline-flex';
+}
+
+/* ---------------- Interface language (English / Arabic) ---------------- */
+
+function setLang(lang){
+  state.uiLang=lang==='ar'?'ar':'en';
+  try{ localStorage.setItem('recon_ui_lang',state.uiLang); }catch(e){}
+  if(typeof applyLanguage==='function') applyLanguage();
 }
 function renderSheetPicker(){
   $('sheetPicker').innerHTML=state.subFilesMeta.map(f=>`
@@ -255,12 +360,18 @@ async function downloadSubmissions(){
 /* ---------------- Depth Search: TB pivot values -> every non-zero cell, every sheet ---------------- */
 
 const DEPTH_TYPES=[['assets','Assets (033)'],['liabilities','Liabilities (034)'],
-  ['offbalance','Off-balance (064) — skipped for now'],['any','Other — search everything']];
+  ['offbalance','Off-balance (064)'],['any','Other — search everything']];
 
 function renderDepthFiles(){
   const box=$('depthFiles'); if(!box) return;
   const ready=state.tbRaw.length>0 && state.subFilesMeta.length>0;
   const pre=$('depthPrereq'); if(pre) pre.style.display=ready?'none':'block';
+  const ex=$('depthExtra');
+  if(ex){
+    const o=state.outstanding;
+    ex.style.display=o?'block':'none';
+    if(o) ex.innerHTML=`Outstanding Report loaded (${esc(o.sheet)}): its Pivot 1 (Bucket) is searched on Maturity sheets only, and Pivot 2 (CATEGORY: ${esc(o.selected_category||'All')}) on every sheet, in Off-balance files.`;
+  }
   if(!state.subFilesMeta.length){ box.innerHTML='<div class="muted" style="padding:6px 2px">No submission files yet — upload them in the Submissions step.</div>'; return; }
   box.innerHTML=state.subFilesMeta.map(f=>{
     const cur=state.fileTypes[f.file]||'any';
@@ -276,7 +387,8 @@ async function runDepth(){
   const j=await api('/api/depth-search/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
     session_id:state.session,file_types:state.fileTypes,
     params:{min_value:num('depthMin',1000),min_scaled:num('depthMinScaled',100000),tol_abs:num('depthTol',1),
-            allow_scale:$('depthScale').checked,allow_sign:$('depthSign').checked,include_accounts:$('depthAccounts').checked}})});
+            allow_scale:$('depthScale').checked,allow_sign:$('depthSign').checked,include_accounts:$('depthAccounts').checked,
+            maturity_keywords:$('depthMat').value}})});
   state.depth=j; renderDepthResults();
   const found=j.files.reduce((a,f)=>a+((f.stats||{}).targets_matched||0),0);
   setStatus(`Depth search done — ${found} TB value(s) located`);
@@ -309,11 +421,11 @@ function renderDepthResults(){
     const rows=shown.map(h=>{ const t=j.targets[h.target_id]||{};
       return `<tr class="${h.currency_check==='CONFLICT'?'conflict':''}">
         <td>${h.color?`<span class="swatch" style="background:#${esc(h.color)}"></span>`:''}</td>
-        <td><b>${esc(t.label)}</b> <span class="muted">${esc(ccyLabel(t.currency))}</span></td><td class="num">${esc(fmt(t.amount))}</td>
+        <td data-tr="1"><b>${esc(t.label)}</b> <span class="muted">${esc(ccyLabel(t.currency))}</span>${t.sheet&&t.sheet!=='TB Pivot'&&t.sheet!=='TB Accounts'?` <span class="muted">· ${esc(t.sheet)}</span>`:''}</td><td class="num">${esc(fmt(t.amount))}</td>
         <td>${esc(h.sheet)}</td><td><b>${esc(h.cell)}</b></td>
-        <td class="num">${esc(h.value.toLocaleString(undefined,{maximumFractionDigits:6}))}</td><td>${esc(depthHow(h))}</td>
+        <td class="num">${esc(h.value.toLocaleString(undefined,{maximumFractionDigits:6}))}</td><td data-tr="1">${esc(depthHow(h))}</td>
         <td>${esc(h.row_label)}</td><td>${esc(h.column_header)}</td>
-        <td title="${h.currency_check==='CONFLICT'?'This column is a different currency from the TB value':''}">${esc(h.currency_check)}</td></tr>`; }).join('');
+        <td data-tr="1" title="${h.currency_check==='CONFLICT'?'This column is a different currency from the TB value':''}">${esc(h.currency_check)}</td></tr>`; }).join('');
     const table=hits.length?`<div class="depthScroll"><table class="depthTable"><thead><tr><th></th><th>TB item</th><th>TB amount</th><th>Sheet</th><th>Cell</th><th>Sheet value</th><th>How matched</th><th>Row label</th><th>Column</th><th>Currency</th></tr></thead><tbody>${rows}</tbody></table></div>`
       +(hits.length>shown.length?`<div class="muted" style="padding:6px 2px">Showing ${shown.length} of ${hits.length} — download the workbook for the full report.</div>`:'')
       :'<div class="muted" style="padding:8px 2px">No matching cells'+(q?' for this filter':'')+'.</div>';
@@ -887,6 +999,14 @@ const CLICK_ACTIONS={
   'extract-subs':(el)=>guarded(el,extractSubs),
   'download-submissions':(el)=>guarded(el,downloadSubmissions),
   'run-depth':(el)=>guarded(el,runDepth),
+  'set-lang':(el)=>setLang(el.dataset.lang),
+  'choose-dict':()=>$('dictFile').click(),
+  'proceed-lang':(el)=>guarded(el,proceedLang),
+  'download-missing':(el)=>guarded(el,()=>downloadFile('/api/submissions/translation-download?session_id='+encodeURIComponent(state.session)+'&kind=missing','Missing_Arabic_Words.xlsx')),
+  'download-translated':(el)=>guarded(el,()=>downloadFile('/api/submissions/translation-download?session_id='+encodeURIComponent(state.session)+'&kind=file&file='+encodeURIComponent(el.dataset.file),'translated.xlsx')),
+  'choose-ob':()=>$('obFile').click(),
+  'upload-ob':(el)=>guarded(el,uploadOutstanding),
+  'download-outstanding':(el)=>guarded(el,()=>downloadFile('/api/outstanding/download?session_id='+encodeURIComponent(state.session),'Outstanding_Report_IRAQ_Pivot_Output.xlsx')),
   'download-depth':(el)=>guarded(el,()=>downloadFile('/api/depth-search/download?session_id='+encodeURIComponent(state.session)+'&file='+encodeURIComponent(el.dataset.file),'DepthSearch.xlsx')),
   'download-depth-all':(el)=>guarded(el,()=>downloadFile('/api/depth-search/download-all?session_id='+encodeURIComponent(state.session),'Depth_Search_Outputs.zip')),
   'set-tb-level':(el)=>{ state.tbLevel=el.dataset.level; renderTbPicker(); },
@@ -952,6 +1072,9 @@ document.addEventListener('change',e=>{
   if(el.dataset.action==='set-header-row'){
     state.selection[el.dataset.file][el.dataset.sheet].header_row=el.value?parseInt(el.value,10):null; return;
   }
+  if(el.dataset.action==='work-lang'){ $('dictBox').style.display=el.value==='en'?'block':'none'; return; }
+  if(el.id==='dictFile'){ $('dictName').textContent=el.files[0]?el.files[0].name:''; return; }
+  if(el.dataset.action==='ob-category'){ guarded(null,()=>changeObCategory(el.value)); return; }
   if(el.dataset.action==='set-file-type'){
     state.fileTypes[el.dataset.file]=el.value;
     if(state.depth) toast('File type changed — run the depth search again to apply it.');
@@ -981,4 +1104,772 @@ document.addEventListener('input',e=>{
   if(e.target.id==='depthFilter') renderDepthResults();
 });
 
+/* ---------------- Interface language: English <-> Arabic ----------------
+   The app is written in English. In Arabic mode every piece of interface text (static or rendered later by
+   any table, toast or notice) is translated from this dictionary by a DOM translator, and the layout flips to
+   right-to-left. Data (account names, file names, amounts, sheet names) is never translated: table cells
+   and picker rows are skipped unless they hold interface text (data-tr, pills, chips). Anything not in the
+   dictionary simply stays English. */
+
+const AR_DICT={
+"Recon Studio": "استوديو التسوية",
+"Bahrain - Iraq": "البحرين - العراق",
+"Overview": "نظرة عامة",
+"Trial Balance": "ميزان المراجعة",
+"TB Pivot": "الجدول المحوري للميزان",
+"Submissions": "التقارير المقدّمة",
+"Off-Balance": "خارج الميزانية",
+"Depth Search": "البحث المتعمق",
+"Mapping Studio": "استوديو الربط",
+"Mapping Coverage": "تغطية الربط",
+"Recon Results": "نتائج التسوية",
+"Reconciliation Map": "خريطة التسوية",
+"Export": "التصدير",
+"Starting...": "جارٍ البدء...",
+"Starting…": "جارٍ البدء…",
+"Language": "اللغة",
+"CONTROLLED RECONCILIATION WORKFLOW": "مسار تسوية مضبوط",
+"From Trial Balance to a fully explainable reconciliation.": "من ميزان المراجعة إلى تسوية قابلة للتفسير بالكامل.",
+"Build the TB pivot, choose exactly which submission sheets to read, let the engine detect currency columns, totals and section hierarchy even in imperfect layouts, then review every Assets↔Assets, sub-group↔sub-group and USD↔USD / Total↔Total match before it's approved.": "أنشئ الجدول المحوري لميزان المراجعة، واختر بدقة أوراق التقارير المقدّمة التي ستُقرأ، ودع المحرّك يكتشف أعمدة العملات والإجماليات وتسلسل الأقسام حتى في التنسيقات غير المنتظمة، ثم راجع كل مطابقة بين الأصول والأصول، والمجموعات الفرعية والمجموعات الفرعية، والدولار والدولار / الإجمالي والإجمالي قبل اعتمادها.",
+"Start with Trial Balance": "ابدأ بميزان المراجعة",
+"Process": "المراحل",
+"Pivot": "الجدول المحوري",
+"Select submission sheets": "اختيار أوراق التقارير",
+"Structural extraction": "الاستخراج الهيكلي",
+"Auto-match groups, sub-groups, currencies & totals": "مطابقة تلقائية للمجموعات والمجموعات الفرعية والعملات والإجماليات",
+"Review / approve": "المراجعة / الاعتماد",
+"Reconciliation": "التسوية",
+"Full lineage map": "خريطة التتبع الكاملة",
+"Excel export": "تصدير إلى Excel",
+"Table-aware reading": "قراءة واعية بالجداول",
+"Header, currency and total columns are detected per sheet from real formatting (bold, indentation) - not a fixed layout.": "تُكتشف أعمدة العناوين والعملات والإجماليات في كل ورقة من التنسيق الفعلي (الخط العريض والإزاحة) وليس من تخطيط ثابت.",
+"Currency & total aware": "مراعاة العملة والإجمالي",
+"USD is only ever compared with USD, IQD with IQD, and Total with Total. Credit/debit sign convention is inferred automatically.": "تُقارَن العملة بنفس العملة فقط: الدولار بالدولار والدينار بالدينار والإجمالي بالإجمالي. ويُستنتج اصطلاح إشارة الدائن/المدين تلقائيًا.",
+"Full lineage": "تتبع كامل",
+"Every accepted match keeps its file, sheet, cell and grouping evidence, shown end-to-end in the Reconciliation Map.": "تحتفظ كل مطابقة معتمدة بأدلة الملف والورقة والخلية والتجميع، وتُعرض من البداية إلى النهاية في خريطة التسوية.",
+"Step 2": "الخطوة 2",
+"Step 4": "الخطوة 4",
+"Upload Trial Balance": "رفع ميزان المراجعة",
+"Dynamic sheet and header detection. No managed folder required.": "اكتشاف ديناميكي للورقة وصف العناوين. لا حاجة إلى مجلد مُدار.",
+"Drop the Trial Balance here": "أفلت ميزان المراجعة هنا",
+"Excel workbook, processed temporarily in the WebApp session": "مصنف Excel تتم معالجته مؤقتًا داخل جلسة التطبيق",
+"Choose file": "اختيار ملف",
+"Inspect and build pivot": "فحص وبناء الجدول المحوري",
+"Trial Balance Pivot": "الجدول المحوري لميزان المراجعة",
+"Rows: BS Mapping → Account → Account Desc | Columns: Tran Ccy | Values: Sum of Adjusted Balance": "الصفوف: ربط الميزانية ← الحساب ← وصف الحساب | الأعمدة: عملة العملية | القيم: مجموع الرصيد المعدّل",
+"Download Excel": "تنزيل Excel",
+"Search mapping, account or description": "ابحث عن ربط أو حساب أو وصف",
+"Group / Sub-group structure detected in the Trial Balance": "هيكل المجموعات / المجموعات الفرعية المكتشف في ميزان المراجعة",
+"Used to auto-match against submission sections": "يُستخدم للمطابقة التلقائية مع أقسام التقارير المقدّمة",
+"Detected sheet": "تم اكتشاف الورقة",
+", header row": "، صف العناوين",
+"in": "في",
+"rows": "الصفوف",
+"groups": "المجموعات",
+"currencies": "العملات",
+"balance": "الرصيد",
+"unmapped": "غير مربوط",
+"No structure detected yet.": "لم يُكتشف أي هيكل بعد.",
+"No account rows": "لا توجد صفوف حسابات",
+"Upload Submission Files": "رفع ملفات التقارير المقدّمة",
+"Upload up to eight workbooks, then choose exactly which sheets to read into the reconciliation.": "ارفع حتى ثمانية مصنفات، ثم اختر بدقة الأوراق التي ستُقرأ ضمن التسوية.",
+"Select the submissions": "اختيار التقارير المقدّمة",
+"Assets, liabilities/capital, and other supporting submissions (max 8)": "الأصول والالتزامات/رأس المال وسائر التقارير الداعمة (بحد أقصى 8)",
+"Choose files": "اختيار ملفات",
+"Inspect workbooks": "فحص المصنفات",
+"Arabic content detected": "تم اكتشاف محتوى عربي",
+"Choose the language you want to work in, then press Proceed.": "اختر اللغة التي تريد العمل بها، ثم اضغط «متابعة».",
+"English": "الإنجليزية",
+"Arabic": "العربية",
+"Translate the submissions to English using your own dictionary, then work in English.": "ترجم التقارير المقدّمة إلى الإنجليزية باستخدام قاموسك الخاص، ثم اعمل بالإنجليزية.",
+"Keep the submissions in Arabic and work on them as they are.": "أبقِ التقارير المقدّمة بالعربية واعمل عليها كما هي.",
+"Dictionary workbook (Arabic in column A, English in column B, header in row 1)": "مصنف القاموس (العربية في العمود A والإنجليزية في العمود B والعناوين في الصف 1)",
+"Choose dictionary": "اختيار القاموس",
+"Proceed": "متابعة",
+"Extract selected sheets": "استخراج الأوراق المحددة",
+"Extracted lines": "البنود المستخرجة",
+"The cleaned, currency-tagged lines read from your selected sheets": "البنود المنظّفة والموسومة بالعملة المقروءة من الأوراق التي اخترتها",
+"Download submissions file": "تنزيل ملف التقارير المقدّمة",
+"Header row": "صف العناوين",
+"No currency columns detected - will use raw numeric cells": "لم تُكتشف أعمدة عملات - ستُستخدم الخلايا الرقمية الخام",
+"Working in Arabic - the submissions are used exactly as uploaded. Choose the sheets to read, then extract.": "العمل بالعربية - تُستخدم التقارير المقدّمة كما رُفعت تمامًا. اختر الأوراق المراد قراءتها ثم نفّذ الاستخراج.",
+"Download missing terms": "تنزيل المصطلحات الناقصة",
+"No submission files yet - upload them in the Submissions step.": "لا توجد ملفات تقارير بعد - ارفعها في خطوة التقارير المقدّمة.",
+"Off-balance": "خارج الميزانية",
+"Outstanding Report": "تقرير الأرصدة القائمة",
+"Upload the Outstanding Report. The raw-data sheet and header row are found automatically, Equ-IQD is cleaned and validated, and two pivots are built. Depth Search then looks for their values in the Off-balance (064) submission, with the Bucket pivot searched on its Maturity sheet only.": "ارفع تقرير الأرصدة القائمة. تُكتشف ورقة البيانات الخام وصف العناوين تلقائيًا، وتُنظَّف قيمة المكافئ بالدينار العراقي وتُراجع، ويُبنى جدولان محوريان. ثم يبحث البحث المتعمق عن قيمهما في تقرير خارج الميزانية (064)، ويُبحث في الجدول المحوري للفترات في ورقة الاستحقاق فقط.",
+"Drop the Outstanding Report here": "أفلت تقرير الأرصدة القائمة هنا",
+"Excel workbook with the raw outstanding-report data": "مصنف Excel يحتوي على البيانات الخام لتقرير الأرصدة القائمة",
+"Build pivots": "بناء الجداول المحورية",
+"Download pivot workbook": "تنزيل مصنف الجداول المحورية",
+"Pivot 1 · Category, LC/GTEE and Currency by Bucket": "الجدول المحوري 1 · الفئة وLC/GTEE والعملة حسب الفترة",
+"Filters: none · Columns: Bucket · Values: Sum of Equ-IQD": "المرشحات: لا يوجد · الأعمدة: الفترة · القيم: مجموع المكافئ بالدينار العراقي",
+"Pivot 2 · LC/GTEE by Currency": "الجدول المحوري 2 · LC/GTEE حسب العملة",
+"Filter: CATEGORY": "المرشح: الفئة",
+"Validation details": "تفاصيل التحقق",
+"All": "الكل",
+"Check": "الفحص",
+"Value": "القيمة",
+"Rows read": "الصفوف المقروءة",
+"Detail rows": "صفوف التفاصيل",
+"Invalid / blank Equ-IQD": "مكافئ غير صالح / فارغ",
+"Source total": "إجمالي المصدر",
+"Difference": "الفرق",
+"Outstanding Report ready": "تقرير الأرصدة القائمة جاهز",
+"Building the Outstanding Report pivots": "جارٍ بناء الجداول المحورية لتقرير الأرصدة القائمة",
+"Choose the Outstanding Report workbook first": "اختر مصنف تقرير الأرصدة القائمة أولًا",
+"Category": "الفئة",
+"LC/GTEE": "LC/GTEE",
+"Grand Total": "الإجمالي العام",
+"Source workbook": "المصنف المصدر",
+"Selected source sheet": "الورقة المصدر المختارة",
+"Detected header row": "صف العناوين المكتشف",
+"Source rows read": "صفوف المصدر المقروءة",
+"Cleaned detail rows": "صفوف التفاصيل المنظّفة",
+"Rows with blank Equ-IQD (excluded)": "صفوف المكافئ الفارغ (مستبعدة)",
+"Rows with invalid / non-numeric Equ-IQD (excluded)": "صفوف المكافئ غير الصالح / غير الرقمي (مستبعدة)",
+"Rows with blank CATEGORY": "صفوف بفئة فارغة",
+"Rows with blank LC/GTEE DESC": "صفوف بوصف LC/GTEE فارغ",
+"Rows with blank BILL_CCY": "صفوف بعملة الفاتورة فارغة",
+"Rows with blank Bucket": "صفوف بفترة فارغة",
+"Potential duplicate transaction rows (not removed)": "صفوف عمليات مكررة محتملة (لم تُحذف)",
+"Source Equ-IQD total (valid rows)": "إجمالي المكافئ بالدينار في المصدر (الصفوف الصالحة)",
+"Distinct CATEGORY values": "قيم الفئة المميزة",
+"Distinct BILL_CCY values": "قيم عملة الفاتورة المميزة",
+"Distinct Bucket values": "قيم الفترات المميزة",
+"Pivot 1 Grand Total": "الإجمالي العام للجدول 1",
+"Warnings": "التحذيرات",
+"Search": "بحث",
+"Look for every Trial Balance pivot value (BS-mapping and group level) in every non-zero cell of every sheet of each submission file - schedules and matrix sheets included. Each file gets its own workbook: your original sheets, the TB pivot, a matching report, and matched cells highlighted in the same colour on both sides.": "ابحث عن كل قيمة في الجدول المحوري لميزان المراجعة (على مستوى ربط الميزانية والمجموعة) في كل خلية غير صفرية في كل ورقة من كل ملف تقرير - بما في ذلك الجداول الملحقة وأوراق المصفوفات. يحصل كل ملف على مصنفه الخاص: أوراقك الأصلية والجدول المحوري لميزان المراجعة وتقرير المطابقة، مع تظليل الخلايا المتطابقة بنفس اللون في الجانبين.",
+"Upload the Trial Balance and the submission workbooks first (the sheets do not need to be extracted).": "ارفع ميزان المراجعة ومصنفات التقارير المقدّمة أولًا (لا يلزم استخراج الأوراق).",
+"1 · What is each file?": "1 · ما نوع كل ملف؟",
+"Assets values (A-…) are searched in the Assets file, liabilities (L-…) in the Liabilities file, and Off-balance values (OB-… plus the Outstanding Report pivots) only in the Off-balance file. The type is guessed from the file name - change it if needed.": "تُبحث قيم الأصول (A-…) في ملف الأصول، والالتزامات (L-…) في ملف الالتزامات، وقيم خارج الميزانية (OB-… إضافةً إلى الجداول المحورية لتقرير الأرصدة القائمة) في ملف خارج الميزانية فقط. يُخمَّن النوع من اسم الملف - غيّره عند الحاجة.",
+"2 · Search settings": "2 · إعدادات البحث",
+"Smallest TB value to search": "أصغر قيمة من الميزان للبحث",
+"Smallest TB value for a ×1,000 / ×1,000,000 match": "أصغر قيمة من الميزان لمطابقة ×1,000 / ×1,000,000",
+"Tolerance (absolute)": "التفاوت (مطلق)",
+"Maturity sheet keywords (Off-balance bucket pivot)": "كلمات ورقة الاستحقاق (جدول الفترات لخارج الميزانية)",
+"Also try thousands / millions (sheets stated \"in thousands\")": "جرّب أيضًا الآلاف / الملايين (الأوراق المذكور فيها «بالآلاف»)",
+"Accept equal-and-opposite sign": "قبول الإشارة المتساوية والمعاكسة",
+"Also search individual account values (more matches, more noise)": "ابحث أيضًا في قيم الحسابات الفردية (مطابقات أكثر وضجيج أكثر)",
+"Run depth search": "تشغيل البحث المتعمق",
+"Download all outputs (zip)": "تنزيل كل المخرجات (zip)",
+"Filter results (TB item, sheet, cell, row label, column…)": "تصفية النتائج (بند الميزان، الورقة، الخلية، تسمية الصف، العمود…)",
+"Assets (033)": "الأصول (033)",
+"Liabilities (034)": "الالتزامات (034)",
+"Off-balance (064)": "خارج الميزانية (064)",
+"Other - search everything": "أخرى - البحث في كل شيء",
+"Download annotated workbook": "تنزيل المصنف المُعلَّم",
+"TB item": "بند الميزان",
+"TB amount": "مبلغ الميزان",
+"Sheet": "الورقة",
+"Cell": "الخلية",
+"Sheet value": "قيمة الورقة",
+"How matched": "طريقة المطابقة",
+"Row label": "تسمية الصف",
+"Column": "العمود",
+"Currency": "العملة",
+"Level": "المستوى",
+"TB Amount": "مبلغ الميزان",
+"exact": "مطابقة تامة",
+"exact match": "مطابقة تامة",
+"opposite sign": "إشارة معاكسة",
+"opposite signs": "إشارتان متعاكستان",
+"sign flipped": "عكس الإشارة",
+"OK": "سليم",
+"UNKNOWN": "غير معروف",
+"CONFLICT": "تعارض",
+"No matching cells.": "لا توجد خلايا مطابقة.",
+"No matching cells for this filter.": "لا توجد خلايا مطابقة لهذا المرشح.",
+"File type changed - run the depth search again to apply it.": "تغيّر نوع الملف - شغّل البحث المتعمق مجددًا لتطبيقه.",
+"Searching every sheet for Trial Balance values": "جارٍ البحث في كل ورقة عن قيم ميزان المراجعة",
+"Upload the Trial Balance first": "ارفع ميزان المراجعة أولًا",
+"Upload the submission files first": "ارفع ملفات التقارير المقدّمة أولًا",
+"Review the engine's suggested matches, then build or import manual matches for anything it couldn't resolve.": "راجع المطابقات التي اقترحها المحرّك، ثم أنشئ مطابقات يدوية أو استوردها لما تعذّر عليه حلّه.",
+"Nothing is reconciled automatically. Every suggestion and manual match below is explicit and reviewable; nothing runs until you press Run reconciliation.": "لا شيء يُسوّى تلقائيًا. كل اقتراح ومطابقة يدوية أدناه صريح وقابل للمراجعة، ولا يُنفَّذ شيء حتى تضغط «تشغيل التسوية».",
+"Show & club Trial Balance accounts by": "عرض حسابات ميزان المراجعة وتجميعها حسب",
+"Account description": "وصف الحساب",
+"Account no.": "رقم الحساب",
+"Build a manual match": "إنشاء مطابقة يدوية",
+"Pick any combination of Trial Balance items on the left and submission lines on the right - a single item, several accounts clubbed together, or a whole group against a whole sub-total. As long as the clubbed values are financially logical, the engine will sum each side and compare them.": "اختر أي تركيبة من بنود ميزان المراجعة وبنود التقارير المقدّمة - بندًا واحدًا، أو عدة حسابات مجمّعة، أو مجموعة كاملة مقابل إجمالٍ فرعي كامل. ما دامت القيم المجمّعة منطقية ماليًا فسيجمع المحرّك كل جانب ويقارنه.",
+"Trial Balance items": "بنود ميزان المراجعة",
+"Accounts": "الحسابات",
+"BS Mapping groups (pivot level)": "مجموعات ربط الميزانية (مستوى الجدول المحوري)",
+"Search account, description or BS mapping": "ابحث عن حساب أو وصف أو ربط ميزانية",
+"Search BS mapping group (e.g. Assets, Other Assets)": "ابحث عن مجموعة ربط ميزانية (مثل الأصول، الأصول الأخرى)",
+"Select all matching": "تحديد كل المطابق",
+"Clear": "مسح",
+"Selected total": "الإجمالي المحدد",
+"Submission items": "بنود التقارير المقدّمة",
+"Search file, sheet or line description": "ابحث عن ملف أو ورقة أو وصف بند",
+"Search submissions for the TB selected total": "ابحث في التقارير عن إجمالي الميزان المحدد",
+"Select Trial Balance items first, then search for that total across every extracted sheet.": "حدّد بنود ميزان المراجعة أولًا، ثم ابحث عن ذلك الإجمالي في كل ورقة مستخرجة.",
+"Match description": "وصف المطابقة",
+"e.g. Cash & balances (Assets) vs submission cash lines": "مثال: النقد والأرصدة (الأصول) مقابل بنود النقد في التقرير",
+"Add manual match": "إضافة مطابقة يدوية",
+"Manual matches": "المطابقات اليدوية",
+"Save your mapping": "احفظ الربط الخاص بك",
+"Download everything you've built above as a portable mapping file - re-upload it against a future period's Trial Balance and submissions to get the same matches re-resolved automatically.": "نزّل كل ما بنيته أعلاه كملف ربط قابل للنقل - أعد رفعه مع ميزان المراجعة والتقارير لفترة لاحقة لتُحَلّ المطابقات نفسها تلقائيًا.",
+"Download mapping file": "تنزيل ملف الربط",
+"Load a saved mapping": "تحميل ربط محفوظ",
+"Upload a mapping file saved earlier. Each match is re-resolved against the current data and added below for review - nothing is applied silently.": "ارفع ملف ربط محفوظًا سابقًا. تُحَلّ كل مطابقة مجددًا مقابل البيانات الحالية وتُضاف أدناه للمراجعة - ولا يُطبَّق شيء بصمت.",
+"Choose mapping file": "اختيار ملف الربط",
+"Apply mapping": "تطبيق الربط",
+"Absolute tolerance": "التفاوت المطلق",
+"Percentage tolerance": "التفاوت النسبي",
+"Run reconciliation": "تشغيل التسوية",
+"Approve": "اعتماد",
+"Approved": "معتمد",
+"Suggestions": "الاقتراحات",
+"TB groups covered": "مجموعات الميزان المغطاة",
+"Avg confidence": "متوسط الثقة",
+"Submission amount": "مبلغ التقرير",
+"Sign applied": "الإشارة المطبّقة",
+"Flipped (×-1)": "معكوسة (×-1)",
+"As reported": "كما وردت",
+"Auto-clubbed subset": "مجموعة فرعية مجمّعة تلقائيًا",
+"File": "الملف",
+"Description": "الوصف",
+"Sheet amount": "مبلغ الورقة",
+"Adjusted amount": "المبلغ المعدّل",
+"Section match:": "مطابقة القسم:",
+"Sub-group match:": "مطابقة المجموعة الفرعية:",
+"Used pre-computed Total rows": "استُخدمت صفوف الإجمالي الجاهزة",
+"Summed individual lines": "جُمعت البنود الفردية",
+"No candidate matches were generated. Build a manual match below.": "لم تُولَّد مطابقات مرشحة. أنشئ مطابقة يدوية أدناه.",
+"No manual matches yet - build one above or load a saved mapping file.": "لا توجد مطابقات يدوية بعد - أنشئ واحدة أعلاه أو حمّل ملف ربط محفوظًا.",
+"Remove": "إزالة",
+"+ Add": "+ إضافة",
+"Added ✓": "تمت الإضافة ✓",
+"Total:": "الإجمالي:",
+"none resolved": "لم يُحَل أي شيء",
+"Forex": "العملات الأجنبية",
+"BS Mapping group total (pivot level)": "إجمالي مجموعة ربط الميزانية (مستوى الجدول المحوري)",
+"No BS Mapping groups yet - upload a Trial Balance first.": "لا توجد مجموعات ربط ميزانية بعد - ارفع ميزان المراجعة أولًا.",
+"No Trial Balance items yet - upload a Trial Balance first.": "لا توجد بنود ميزان مراجعة بعد - ارفع ميزان المراجعة أولًا.",
+"No submission items yet - extract sheets first.": "لا توجد بنود تقارير بعد - استخرج الأوراق أولًا.",
+"Sign flipped": "إشارة معكوسة",
+"Submissions extracted": "تم استخراج التقارير",
+"Extracting submission sheets": "جارٍ استخراج أوراق التقارير",
+"Select at least one sheet": "حدّد ورقة واحدة على الأقل",
+"Of every mapping rule the app knows about (the bundled default mapping, plus anything you've imported), how many actually found a match - and how many didn't, and why.": "من بين كل قاعدة ربط يعرفها التطبيق (الربط الافتراضي المضمّن إضافةً إلى ما استوردته)، كم منها وجد مطابقة وكم منها لم يجد، ولماذا.",
+"Export workbook": "تصدير المصنف",
+"Every rule, in detail": "كل قاعدة بالتفصيل",
+"Fulfilled = data was found on both sides. Reconciled = it was also approved and run, and the numbers agreed.": "مُنجَزة = وُجدت البيانات في الجانبين. مسوّاة = اعتُمدت أيضًا ونُفّذت وتطابقت الأرقام.",
+"Fulfilled only": "المنجزة فقط",
+"Unresolved only": "غير المحلولة فقط",
+"Reconciled only": "المسوّاة فقط",
+"Needs review only": "المحتاجة لمراجعة فقط",
+"Search label, currency or warning text": "ابحث في التسمية أو العملة أو نص التحذير",
+"Total rules": "إجمالي القواعد",
+"Fulfilled (data found)": "منجزة (وُجدت البيانات)",
+"Unresolved (no data)": "غير محلولة (لا بيانات)",
+"Reconciled (matched)": "مسوّاة (متطابقة)",
+"Needs review": "تحتاج مراجعة",
+"Mapping rule": "قاعدة الربط",
+"Data found?": "هل وُجدت البيانات؟",
+"TB accounts": "حسابات الميزان",
+"Submission lines": "بنود التقارير",
+"Reconciliation outcome": "نتيجة التسوية",
+"Submission Amount": "مبلغ التقرير",
+"Detail": "التفاصيل",
+"FULFILLED": "منجزة",
+"NOT FOUND": "غير موجودة",
+"not run": "لم تُنفَّذ",
+"Reconciliation Results": "نتائج التسوية",
+"Traceable amounts, variance and review status per group, sub-group and currency.": "مبالغ قابلة للتتبع وفروقات وحالة مراجعة لكل مجموعة ومجموعة فرعية وعملة.",
+"How every Trial Balance group connects to its submission evidence - the full lineage, end to end.": "كيف ترتبط كل مجموعة في ميزان المراجعة بأدلة التقرير المقدّم - التتبع الكامل من البداية إلى النهاية.",
+"Audit-ready workbook": "مصنف جاهز للتدقيق",
+"Includes executive summary, TB pivot, TB detail, submission inventory, auto-suggestions, reconciliation results and the full reconciliation map.": "يتضمن الملخص التنفيذي والجدول المحوري لميزان المراجعة وتفاصيله وجرد التقارير المقدّمة والاقتراحات التلقائية ونتائج التسوية وخريطة التسوية الكاملة.",
+"Download reconciliation workbook": "تنزيل مصنف التسوية",
+"Temporary session files are not written to a Dataiku managed folder.": "لا تُكتب ملفات الجلسة المؤقتة في مجلد Dataiku المُدار.",
+"BS Mapping": "ربط الميزانية",
+"Variance %": "نسبة الفرق %",
+"Status": "الحالة",
+"Rule": "القاعدة",
+"Source": "المصدر",
+"Account": "الحساب",
+"Row": "الصف",
+"Amount": "المبلغ",
+"Section": "القسم",
+"Line description": "وصف البند",
+"Total row?": "صف إجمالي؟",
+"Trial Balance side": "جانب ميزان المراجعة",
+"Submission side": "جانب التقرير المقدّم",
+"No evidence rows": "لا توجد صفوف أدلة",
+"No reconciliation rule approved for this line yet.": "لم تُعتمد أي قاعدة تسوية لهذا البند بعد.",
+"Manual & imported matches": "المطابقات اليدوية والمستوردة",
+"Run the reconciliation to build the map.": "شغّل التسوية لبناء الخريطة.",
+"Reconciliation complete": "اكتملت التسوية",
+"Approve at least one suggestion or build a manual match": "اعتمد اقتراحًا واحدًا على الأقل أو أنشئ مطابقة يدوية",
+"No records yet": "لا توجد سجلات بعد",
+"MATCH": "مطابق",
+"MATCH_WITHIN_TOLERANCE": "مطابق ضمن التفاوت",
+"REVIEW_REQUIRED": "يتطلب مراجعة",
+"UNRESOLVED": "غير محلول",
+"NOT_APPROVED": "غير معتمد",
+"MANUAL": "يدوي",
+"AUTO": "تلقائي",
+"DEFAULT": "افتراضي",
+"IMPORTED": "مستورد",
+"TOTAL": "الإجمالي",
+"Session ready": "الجلسة جاهزة",
+"Could not start a session": "تعذّر بدء الجلسة",
+"Error - see message": "خطأ - راجع الرسالة",
+"Processing Trial Balance": "جارٍ معالجة ميزان المراجعة",
+"TB pivot ready": "الجدول المحوري للميزان جاهز",
+"Choose a Trial Balance workbook first": "اختر مصنف ميزان المراجعة أولًا",
+"Choose submission files first": "اختر ملفات التقارير المقدّمة أولًا",
+"Inspecting submission workbooks": "جارٍ فحص مصنفات التقارير",
+"Choose submission sheets": "اختر أوراق التقارير",
+"Choose a working language": "اختر لغة العمل",
+"Choose Arabic or English first": "اختر العربية أو الإنجليزية أولًا",
+"Choose your dictionary workbook first": "اختر مصنف القاموس أولًا",
+"Translating the submissions to English": "جارٍ ترجمة التقارير إلى الإنجليزية",
+"No active session yet": "لا توجد جلسة نشطة بعد",
+"Select Trial Balance items first": "حدّد بنود ميزان المراجعة أولًا",
+"Extract submission sheets first": "استخرج أوراق التقارير أولًا",
+"Added to submission side of the match": "أُضيف إلى جانب التقرير في المطابقة",
+"Select at least one item on each side": "حدّد بندًا واحدًا على الأقل في كل جانب",
+"Give this match a short description": "أعطِ هذه المطابقة وصفًا قصيرًا",
+"Selected TB items span multiple currencies - compared as a combined TOTAL.": "بنود الميزان المحددة تشمل عدة عملات - ستُقارَن كإجمالٍ مجمّع.",
+"Manual match added": "تمت إضافة المطابقة اليدوية",
+"No manual matches to save yet": "لا توجد مطابقات يدوية للحفظ بعد",
+"Choose a mapping file first": "اختر ملف الربط أولًا",
+"That file is not valid JSON.": "هذا الملف ليس JSON صالحًا.",
+"No matches found in that mapping file.": "لم يُعثر على مطابقات في ملف الربط هذا.",
+"Some picks only partly covered the new grouping and were dropped - re-pick them.": "بعض الاختيارات غطّت التجميع الجديد جزئيًا فأُسقطت - أعد اختيارها.",
+"The bahrain_iraq_algorithm library in your project is out of date (no FRX* support) - copy the latest engine.py into it and restart the backend.": "مكتبة bahrain_iraq_algorithm في مشروعك قديمة (لا تدعم FRX*) - انسخ أحدث engine.py إليها وأعد تشغيل الخلفية.",
+"This usually means the server raised an error. Check the Dataiku backend log.": "يعني هذا غالبًا أن الخادم أصدر خطأً. راجع سجل خلفية Dataiku.",
+"Upload a Trial Balance workbook.": "ارفع مصنف ميزان المراجعة.",
+"Upload at least one submission workbook.": "ارفع مصنف تقارير مقدّمة واحدًا على الأقل.",
+"Upload submission workbooks first.": "ارفع مصنفات التقارير المقدّمة أولًا.",
+"Upload the submission workbooks first.": "ارفع مصنفات التقارير المقدّمة أولًا.",
+"Upload the submission workbooks first (Submissions step).": "ارفع مصنفات التقارير المقدّمة أولًا (خطوة التقارير المقدّمة).",
+"Upload and process the Trial Balance first.": "ارفع ميزان المراجعة وعالجه أولًا.",
+"Process the Trial Balance and submissions first.": "عالج ميزان المراجعة والتقارير المقدّمة أولًا.",
+"Process submissions first.": "عالج التقارير المقدّمة أولًا.",
+"No processed Trial Balance.": "لا يوجد ميزان مراجعة معالَج.",
+"No submission lines extracted yet.": "لم تُستخرج بنود تقارير بعد.",
+"No amount given.": "لم يُحدَّد مبلغ.",
+"No file uploaded": "لم يُرفع أي ملف",
+"Run reconciliation first.": "شغّل التسوية أولًا.",
+"Run the depth search first.": "شغّل البحث المتعمق أولًا.",
+"That file was not part of the last depth search.": "لم يكن هذا الملف ضمن آخر بحث متعمق.",
+"No searched files to download.": "لا توجد ملفات مبحوثة للتنزيل.",
+"Upload the Outstanding Report first.": "ارفع تقرير الأرصدة القائمة أولًا.",
+"Upload the Outstanding Report workbook.": "ارفع مصنف تقرير الأرصدة القائمة.",
+"Choose Arabic or English.": "اختر العربية أو الإنجليزية.",
+"No translation has been run yet.": "لم تُشغَّل أي ترجمة بعد.",
+"That file was not translated.": "لم يُترجَم هذا الملف.",
+"Upload your dictionary workbook (Arabic in column A, English in column B, header in row 1).": "ارفع مصنف القاموس (العربية في العمود A والإنجليزية في العمود B والعناوين في الصف 1).",
+"The dictionary has no usable rows (Arabic in column A, English in column B, header in row 1).": "لا يحتوي القاموس على صفوف صالحة (العربية في العمود A والإنجليزية في العمود B والعناوين في الصف 1).",
+"Upload a Trial Balance and process submissions before importing a mapping.": "ارفع ميزان المراجعة وعالج التقارير قبل استيراد ربط.",
+"The uploaded mapping file has no matches in it.": "لا يحتوي ملف الربط المرفوع على أي مطابقات.",
+"Repeated header rows removed": "صفوف العناوين المكررة المحذوفة",
+"Bucket labels that differ only by case/spacing": "تسميات الفترات التي تختلف في الحروف/المسافات فقط",
+"Sum of Equ-IQD by Bucket": "مجموع المكافئ بالدينار حسب الفترة",
+"Pivot 2 Grand Total (all categories)": "الإجمالي العام للجدول 2 (كل الفئات)",
+"Pivot 2 Grand Total (as selected)": "الإجمالي العام للجدول 2 (حسب الاختيار)",
+"Reconciliation difference (source - Pivot 1)": "فرق التسوية (المصدر - الجدول 1)",
+"Reconciliation difference (source - Pivot 2)": "فرق التسوية (المصدر - الجدول 2)",
+"· Sub-group match:": "· مطابقة المجموعة الفرعية:",
+"· Summed individual lines": "· جُمعت البنود الفردية",
+"· Used pre-computed Total rows": "· استُخدمت صفوف الإجمالي الجاهزة",
+"Forex: sub-total of every currency other than the local currency": "العملات الأجنبية: المجموع الفرعي لكل عملة غير العملة المحلية",
+"Amount search": "البحث بالمبلغ",
+"Sheets": "الأوراق",
+"Rows with invalid or blank Equ-IQD": "صفوف بمكافئ غير صالح أو فارغ",
+"Distinct values": "القيم المميزة"
+};
+const AR_RULES=[
+[
+"^(\\d+) selected$",
+"{1} محدد"
+],
+[
+"^(\\d+) selected \\((\\d+) accounts\\)$",
+"{1} محدد ({2} حسابات)"
+],
+[
+"^Showing first (\\d+) of (\\d+) - refine your search$",
+"عرض أول {1} من {2} - حسّن بحثك"
+],
+[
+"^Showing (\\d+) of (\\d+) - download the workbook for the full report\\.$",
+"عرض {1} من {2} - نزّل المصنف للحصول على التقرير الكامل."
+],
+[
+"^(\\d+) sheet\\(s\\)$",
+"{1} ورقة"
+],
+[
+"^(\\d+) sheets scanned$",
+"تم فحص {1} ورقة"
+],
+[
+"^([\\d,.]+) non-zero cells$",
+"{1} خلية غير صفرية"
+],
+[
+"^(\\d+) of (\\d+) TB values found$",
+"تم العثور على {1} من {2} قيمة من الميزان"
+],
+[
+"^(\\d+) currency conflict\\(s\\) not highlighted$",
+"{1} تعارض في العملة غير مظلَّل"
+],
+[
+"^(\\d+) TB value\\(s\\) not found in this file$",
+"{1} قيمة من الميزان لم يُعثر عليها في هذا الملف"
+],
+[
+"^Depth search done - (\\d+) TB value\\(s\\) located$",
+"اكتمل البحث المتعمق - تم تحديد {1} قيمة"
+],
+[
+"^(\\d+) accts?$",
+"{1} حساب"
+],
+[
+"^(\\d+) lines · (\\d+) accts$",
+"{1} بنود · {2} حسابات"
+],
+[
+"^(\\d+) lines$",
+"{1} بنود"
+],
+[
+"^(\\d+) lines · (\\d+) accts$",
+"{1} بنود · {2} حسابات"
+],
+[
+"^confidence (\\d+)%$",
+"الثقة {1}%"
+],
+[
+"^Match basis & evidence \\((\\d+) lines?\\)$",
+"أساس المطابقة والأدلة ({1} بنود)"
+],
+[
+"^(\\d+) match(?:es)?$",
+"{1} مطابقة"
+],
+[
+"^(\\d+) TB account row\\(s\\)$",
+"{1} صف حساب من الميزان"
+],
+[
+"^(\\d+) account rows$",
+"{1} صفوف حسابات"
+],
+[
+"^Inspected (\\d+) workbook\\(s\\)\\. Choose the sheets to read, then extract\\.$",
+"تم فحص {1} مصنف. اختر الأوراق المراد قراءتها ثم نفّذ الاستخراج."
+],
+[
+"^Extracted$",
+"تم استخراج"
+],
+[
+"^currency-tagged lines\\. Generated$",
+"بنود موسومة بالعملة. تم توليد"
+],
+[
+"^candidate matches\\.$",
+"مطابقات مرشحة."
+],
+[
+"^candidate matches\\. Included$",
+"مطابقات مرشحة. تم تضمين"
+],
+[
+"^match(?:es)? from the default mapping automatically \\(review under Manual matches - see Mapping Coverage for the full picture: (.*)\\)\\.$",
+"مطابقة من الربط الافتراضي تلقائيًا (راجعها ضمن المطابقات اليدوية - وانظر تغطية الربط للصورة الكاملة: {1:t})."
+],
+[
+"^(\\d+) of (\\d+) rules fulfilled$",
+"{1} من {2} قاعدة منجزة"
+],
+[
+"^, (\\d+) data rows\\.$",
+"، {1} صفوف بيانات."
+],
+[
+"^Translated (\\d+) cell\\(s\\) and (\\d+) sheet name\\(s\\) using (\\d+) dictionary entries\\. (\\d+) Arabic term\\(s\\) were not in the dictionary - the English workbook is used from here on\\.$",
+"تمت ترجمة {1} خلية و{2} اسم ورقة باستخدام {3} مدخلًا من القاموس. {4} مصطلحًا عربيًا لم يكن في القاموس - يُستخدم المصنف الإنجليزي من الآن فصاعدًا."
+],
+[
+"^- (\\d+) Arabic cell\\(s\\) in (\\d+) sheet\\(s\\)$",
+"- {1} خلية عربية في {2} ورقة"
+],
+[
+"^Will search for: (.+) \\(current TB selected total\\)$",
+"سيتم البحث عن: {1} (إجمالي الميزان المحدد حاليًا)"
+],
+[
+"^Found (\\d+) line\\(s\\) across all extracted sheets matching (.+)\\.$",
+"تم العثور على {1} بند في كل الأوراق المستخرجة يطابق {2}."
+],
+[
+"^Found (\\d+) line\\(s\\) across all extracted sheets matching (.+) \\(showing the closest 200\\)\\.$",
+"تم العثور على {1} بند في كل الأوراق المستخرجة يطابق {2} (عرض أقرب 200)."
+],
+[
+"^Found (\\d+) match\\(es\\)$",
+"تم العثور على {1} مطابقة"
+],
+[
+"^Detected (.+) - applied automatically\\.$",
+"تم اكتشاف {1:t} - طُبّق تلقائيًا."
+],
+[
+"^([×÷][\\d,.]+) scale$",
+"مقياس {1}"
+],
+[
+"^([×÷][\\d,.]+) scale and sign flipped$",
+"مقياس {1} مع عكس الإشارة"
+],
+[
+"^a ([×÷][\\d,.]+) scale$",
+"مقياس {1}"
+],
+[
+"^a ([×÷][\\d,.]+) scale and sign flipped$",
+"مقياس {1} مع عكس الإشارة"
+],
+[
+"^✓ Values match directly - TB (.+) vs submission (.+)\\.$",
+"✓ القيم متطابقة مباشرة - الميزان {1} مقابل التقرير {2}."
+],
+[
+"^✓ Equal and opposite - TB (.+) vs submission (.+)\\. The submission side will be sign-flipped when you add the match\\.$",
+"✓ متساويان ومتعاكسان - الميزان {1} مقابل التقرير {2}. ستُعكس إشارة جانب التقرير عند إضافة المطابقة."
+],
+[
+"^⚠ TB (.+) vs submission (.+) don't match directly, but with the (.+) the submission becomes (.+) - this will be applied automatically when you add the match\\.$",
+"⚠ الميزان {1} مقابل التقرير {2} غير متطابقين مباشرة، لكن مع {3:t} يصبح التقرير {4} - وسيُطبَّق ذلك تلقائيًا عند إضافة المطابقة."
+],
+[
+"^✓ Values match - TB (.+) vs submission (.+) \\(using the scale/sign found by amount search\\)\\.$",
+"✓ القيم متطابقة - الميزان {1} مقابل التقرير {2} (باستخدام المقياس/الإشارة التي وجدها البحث بالمبلغ)."
+],
+[
+"^⚠ TB (.+) vs submission (.+) \\(after the amount-search transform\\) still don't agree - double-check before adding\\.$",
+"⚠ الميزان {1} مقابل التقرير {2} (بعد تحويل البحث بالمبلغ) لا يزالان غير متطابقين - تحقق مجددًا قبل الإضافة."
+],
+[
+"^Imported (\\d+) match\\(es\\), (\\d+) need review \\(see the warning badges below\\)\\.$",
+"تم استيراد {1} مطابقة، منها {2} تحتاج مراجعة (انظر شارات التحذير أدناه)."
+],
+[
+"^Imported (\\d+) match\\(es\\)\\.$",
+"تم استيراد {1} مطابقة."
+],
+[
+"^Trial Balance \\((\\d+)\\)$",
+"ميزان المراجعة ({1})"
+],
+[
+"^Trial Balance \\((\\d+) by (description|account no\\.) · (\\d+) lines\\)$",
+"ميزان المراجعة ({1} حسب {2:t} · {3} بنود)"
+],
+[
+"^description$",
+"الوصف"
+],
+[
+"^Submission \\((\\d+)\\)$",
+"التقرير المقدّم ({1})"
+],
+[
+"^Scale (.+) applied$",
+"تم تطبيق المقياس {1}"
+],
+[
+"^Scale-adjusted (.+)$",
+"مُعدَّل بالمقياس {1}"
+],
+[
+"^TOTAL ([\\d,.\\-]+)$",
+"الإجمالي {1}"
+],
+[
+"^All non-(\\w+) currencies, re-totalled each time the mapping is applied$",
+"كل العملات غير {1}، يُعاد جمعها في كل مرة يُطبَّق فيها الربط"
+],
+[
+"^Outstanding Report loaded \\((.+)\\): its Pivot 1 \\(Bucket\\) is searched on Maturity sheets only, and Pivot 2 \\(CATEGORY: (.+)\\) on every sheet, in Off-balance files\\.$",
+"تم تحميل تقرير الأرصدة القائمة ({1}): يُبحث عن الجدول المحوري 1 (الفترات) في أوراق الاستحقاق فقط، وعن الجدول المحوري 2 (الفئة: {2:t}) في كل ورقة، ضمن ملفات خارج الميزانية."
+],
+[
+"^(\\d+) row\\(s\\) have a blank or non-numeric Equ-IQD and are excluded from every total \\(see Validation\\)\\.$",
+"{1} صف/صفوف بمكافئ فارغ أو غير رقمي وهي مستبعدة من كل الإجماليات (انظر التحقق)."
+],
+[
+"^Pivot grand totals do not agree with the cleaned source total \\(difference (.+) / (.+)\\)\\.$",
+"الإجماليات العامة للجداول المحورية لا تتفق مع إجمالي المصدر المنظّف (الفرق {1} / {2})."
+],
+[
+"^(\\d+) sheets? / files? had this section$",
+"{1} أوراق/ملفات تحتوي هذا القسم"
+],
+[
+"^Download (.+) \\(translated\\)$",
+"تنزيل {1} (مترجم)"
+],
+[
+"^([×÷][\\d,.]+) \\(sheet is in thousands\\)$",
+"{1} (الورقة بالآلاف)"
+],
+[
+"^This column is a different currency from the TB value$",
+"هذا العمود بعملة مختلفة عن قيمة الميزان"
+],
+[
+"^(\\d+) sheets/files had this section$",
+"{1} أوراق/ملفات تحتوي هذا القسم"
+],
+[
+"^- picked the one whose amount agrees with the TB: (.+?) · (.+)$",
+"- تم اختيار الذي يتفق مبلغه مع الميزان: {1} · {2:t}"
+],
+[
+"^- none agreed with the TB, took the closest: (.+?) · (.+)$",
+"- لم يتفق أي منها مع الميزان، وتم أخذ الأقرب: {1} · {2:t}"
+],
+[
+"^· Auto-clubbed a subset of lines \\(excluded (\\d+)\\)$",
+"· جُمّعت مجموعة فرعية من البنود (استُبعد {1})"
+],
+[
+"^· Scale detected: (.+)$",
+"· المقياس المكتشف: {1}"
+],
+[
+"^Auto-clubbed a subset of lines \\(excluded (\\d+)\\)$",
+"جُمّعت مجموعة فرعية من البنود (استُبعد {1})"
+],
+[
+"^TB (.+) vs submission (.+) \\(Δ (.+)\\)$",
+"الميزان {1} مقابل التقرير {2} (Δ {3})"
+],
+[
+"^· OB Pivot (\\d)$",
+"· جدول خارج الميزانية {1}"
+],
+[
+"^No sheet in this file has a maturity/tenure name \\((.*)\\), so the Outstanding Report bucket pivot \\((\\d+) values\\) was not searched here\\. Adjust the keywords if the sheet is named differently\\.$",
+"لا توجد ورقة في هذا الملف باسم استحقاق/أجل ({1})، لذلك لم يُبحث هنا عن الجدول المحوري للفترات في تقرير الأرصدة القائمة ({2} قيمة). عدّل الكلمات إذا كانت الورقة تحمل اسمًا مختلفًا."
+],
+[
+"^(\\d+) formula cell\\(s\\) have no saved value \\(the file was never recalculated in Excel\\), so they could not be searched - open and save the file in Excel once, then upload it again\\.$",
+"{1} خلية معادلة بلا قيمة محفوظة (لم يُعَد حساب الملف في Excel قط) لذلك تعذّر البحث فيها - افتح الملف في Excel واحفظه مرة واحدة ثم ارفعه مجددًا."
+],
+[
+"^Could not read this workbook: (.+)$",
+"تعذّرت قراءة هذا المصنف: {1}"
+],
+[
+"^Off-balance files are not searched yet\\.$",
+"ملفات خارج الميزانية لا تُبحث بعد."
+]
+].map(([src,tpl])=>[new RegExp(src),tpl]);
+const I18N_ATTRS=['placeholder','title','aria-label'];
+const I18N_SKIP_SEL='td:not([data-tr]),.pTitle,.pSub,.nodeName,.acctRow,.srTitle,.srSub,.sheetTitle,.fileCardHead b,.depthFileRow b,.chipFile';
+const I18N_TEXT=new WeakMap();      // text node -> {en, arRaw}
+const I18N_ATTR=new WeakMap();      // element   -> {attr: {en, ar}}
+let i18nObs=null, i18nBusy=false;
+
+function i18nKey(s){ return String(s).replace(/[‐-―−]/g,'-').replace(/ /g,' ').replace(/\s+/g,' ').trim(); }
+const AR_NORM=Object.create(null);
+Object.keys(AR_DICT).forEach(k=>{ AR_NORM[i18nKey(k)]=AR_DICT[k]; });
+
+function translateUi(s,depth){
+  const k=i18nKey(s); if(!k) return null;
+  if(AR_NORM[k]!==undefined) return AR_NORM[k];
+  for(const [re,tpl] of AR_RULES){
+    const m=re.exec(k);
+    if(m) return tpl.replace(/\{(\d)(:t)?\}/g,(_,i,t)=>{
+      const g=m[+i]||''; if(!t) return g;
+      const x=translateUi(g,(depth||0)+1); return x==null?g:x; });
+  }
+  if(!depth && k.indexOf(', ')>0){                      // "x1,000 (sheet is in thousands), opposite sign"
+    const parts=k.split(', '), tr=parts.map(p=>translateUi(p,1));
+    if(tr.some(x=>x!=null)) return parts.map((p,i)=>tr[i]==null?p:tr[i]).join('، ');
+  }
+  return null;
+}
+function i18nSkippable(el){
+  if(!el) return true;
+  if(el.closest('script,style,.langBtn')) return true;
+  if(el.closest('.pill,.chip,[data-tr]')) return false;
+  return !!el.closest(I18N_SKIP_SEL);
+}
+function i18nText(n){
+  const raw=n.nodeValue; if(!raw||!raw.trim()) return;
+  const rec=I18N_TEXT.get(n);
+  if(state.uiLang==='ar'){
+    if(rec && raw===rec.arRaw) return;                 // already translated by us
+    if(i18nSkippable(n.parentElement)) return;
+    const ar=translateUi(raw); if(ar==null) return;
+    const out=raw.match(/^\s*/)[0]+ar+raw.match(/\s*$/)[0];
+    I18N_TEXT.set(n,{en:raw,arRaw:out}); n.nodeValue=out;
+  }else if(rec){
+    if(raw===rec.arRaw) n.nodeValue=rec.en;
+    I18N_TEXT.delete(n);
+  }
+}
+function i18nAttrs(el){
+  if(!el.getAttribute) return;
+  for(const a of I18N_ATTRS){
+    const v=el.getAttribute(a); if(!v) continue;
+    const m=I18N_ATTR.get(el)||{}, rec=m[a];
+    if(state.uiLang==='ar'){
+      if(rec && v===rec.ar) continue;
+      const ar=translateUi(v); if(ar==null) continue;
+      m[a]={en:v,ar}; I18N_ATTR.set(el,m); el.setAttribute(a,ar);
+    }else if(rec){
+      if(v===rec.ar) el.setAttribute(a,rec.en);
+      delete m[a];
+    }
+  }
+}
+function i18nWalk(root){
+  if(root.nodeType===1){ i18nAttrs(root); root.querySelectorAll('[placeholder],[title],[aria-label]').forEach(i18nAttrs); }
+  const tw=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null);
+  const nodes=[]; while(tw.nextNode()) nodes.push(tw.currentNode);
+  nodes.forEach(i18nText);
+}
+function i18nStartObserver(){
+  if(i18nObs||!window.MutationObserver) return;
+  i18nObs=new MutationObserver(muts=>{
+    if(i18nBusy||state.uiLang!=='ar') return;
+    i18nBusy=true;
+    try{
+      muts.forEach(m=>{
+        if(m.type==='characterData') i18nText(m.target);
+        else if(m.type==='attributes') i18nAttrs(m.target);
+        else m.addedNodes.forEach(nd=>{ if(nd.nodeType===3) i18nText(nd); else if(nd.nodeType===1) i18nWalk(nd); });
+      });
+    }finally{ i18nBusy=false; i18nObs.takeRecords(); }
+  });
+  i18nObs.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:I18N_ATTRS});
+}
+function applyLanguage(){
+  const ar=state.uiLang==='ar';
+  const app=document.getElementById('app');
+  if(app){ app.setAttribute('dir',ar?'rtl':'ltr'); app.setAttribute('lang',ar?'ar':'en'); }
+  document.querySelectorAll('#langSwitch .langBtn').forEach(b=>b.classList.toggle('active',b.dataset.lang===state.uiLang));
+  i18nBusy=true;
+  try{ i18nWalk(document.body); }finally{ i18nBusy=false; if(i18nObs) i18nObs.takeRecords(); }
+  i18nStartObserver();
+}
+function loadSavedLang(){
+  try{ if(localStorage.getItem('recon_ui_lang')==='ar') state.uiLang='ar'; }catch(e){}
+  applyLanguage();
+}
+
+loadSavedLang();
 init();

@@ -19,8 +19,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.hyperlink import Hyperlink
 
-from .engine import (FORMULA_REF_PATTERN, FRX_CODE, LOCAL_CCY, classify_currency_header,
-                     detect_scale, split_hierarchy, text_similarity)
+from .engine import (FORMULA_REF_PATTERN, FRX_CODE, LOCAL_CCY, ar_norm, classify_currency_header,
+                     detect_scale, normalize_digits, split_hierarchy, text_similarity)
 
 FILE_TYPES = ("assets", "liabilities", "offbalance", "any")
 FILE_TYPE_LABELS = {"assets": "Assets (033)", "liabilities": "Liabilities (034)",
@@ -32,18 +32,28 @@ PALETTE = ["FFE699", "C6E0B4", "9DC3E6", "F4B183", "D9C2E9", "FFB3BA", "B7E1CD",
            "A6E3E9", "FFD3A5", "E2F0A0", "C9B6F2", "F7C6E0", "9FE2D0", "FFC9A8", "CDE0A6"]
 
 FOREIGN_PAT = re.compile(r"foreign\s+currenc|foreign\s+exchange|\bforex\b|\bfx\b", re.I)
+# the same in Arabic, written in ar_norm() form (checked against the normalised text)
+FOREIGN_PAT_AR = re.compile(r"عملات?\s+(?:ال)?اجنبيه|(?:ال)?عمله\s+(?:ال)?اجنبيه|صرف\s+(?:ال)?اجنبي")
 DEFAULT_PARAMS = {"min_value": 1000.0, "min_scaled": 100000.0, "tol_abs": 1.0,
                   "allow_scale": True, "allow_sign": True, "include_accounts": False,
-                  "max_hits": 25}
+                  "max_hits": 25,
+                  # Off-balance: the bucket (tenure) pivot is only searched on sheets whose name says maturity
+                  "maturity_keywords": "maturity, tenor, tenure, استحقاق, آجال, أجل"}
 SCALES_ALT = (1000.0, 1000000.0, 0.001, 0.000001)
 # a sheet-wide unit note such as "(Amounts in Thousand Iraqi Dinars)" or "Equivalent in Thousand Dinars"
 UNIT_NOTE = re.compile(r"\bamounts?\s+in\b|\bin\s+(thousand|million)s?\b|\bequivalent\b", re.I)
+UNIT_NOTE_AR = re.compile(r"المبالغ|(?:ب)?(?:ال)?الاف|(?:ب)?(?:ال)?ملايين|(?:ال)?معادل")
+
+
+def _is_unit_note(text):
+    t = str(text or "")
+    return bool(UNIT_NOTE.search(t) or UNIT_NOTE_AR.search(ar_norm(t)))
 
 
 # ---------------------------------------------------------------- small helpers
 
 def _numeric_string(s):
-    t = s.replace(",", "").replace(" ", "")
+    t = normalize_digits(s).replace(",", "").replace(" ", "")      # Arabic-Indic digits and separators too
     neg = t.startswith("(") and t.endswith(")")
     if neg:
         t = t[1:-1]
@@ -74,7 +84,7 @@ def column_currency(text):
         code = LOCAL_CCY
     if code and code.startswith("TOTAL_"):
         code = code[len("TOTAL_"):]
-    if FOREIGN_PAT.search(t):
+    if FOREIGN_PAT.search(t) or FOREIGN_PAT_AR.search(ar_norm(t)):
         if code and code not in (LOCAL_CCY, "TOTAL"):
             return code
         return FRX_CODE
@@ -96,23 +106,32 @@ def currency_check(target_ccy, cell_ccy):
 
 
 def family_of(label):
-    u = str(label or "").strip().upper()
-    if re.match(r"^A[\s\-_/]", u) or u.startswith("ASSET"):
+    """Which kind of submission can hold this BS mapping: A-... assets, L-... liabilities, OB-... off-balance
+    (and ONLY off-balance - never searched in Assets or Liabilities files)."""
+    raw = str(label or "").strip()
+    u = raw.upper()
+    n = ar_norm(raw)
+    if re.match(r"^OB([\s\-_/]|$)", u) or u.startswith("OFF") or u.startswith("CONTINGENT") or "خارج الميزانيه" in n:
+        return "offbalance"
+    if re.match(r"^A[\s\-_/]", u) or u.startswith("ASSET") or n.startswith("الاصول") or n.startswith("الموجودات"):
         return "assets"
-    if re.match(r"^L[\s\-_/]", u) or u.startswith("LIAB"):
+    if re.match(r"^L[\s\-_/]", u) or u.startswith("LIAB") or n.startswith("المطلوبات") or n.startswith("الخصوم") \
+            or n.startswith("الالتزامات"):
         return "liabilities"
     return "other"
 
 
 def guess_file_type(filename, sheet_names=None):
-    """033 = Assets, 034 = Liabilities, 064 = Off-balance. File name first, sheet names second."""
+    """033 = Assets, 034 = Liabilities, 064 = Off-balance - in English or Arabic. File name first, sheet names second."""
     def hit(text):
         t = str(text or "").lower()
-        if "064" in t or "off balance" in t or "off-balance" in t or "offbalance" in t or "contingent" in t:
+        n = ar_norm(t)
+        if "064" in t or "off balance" in t or "off-balance" in t or "offbalance" in t or "contingent" in t \
+                or "خارج الميزانيه" in n or "خارج الميزانية" in t:
             return "offbalance"
-        if "034" in t or "liabilit" in t or "capital" in t:
+        if "034" in t or "liabilit" in t or "capital" in t or "المطلوبات" in n or "الخصوم" in n or "الالتزامات" in n:
             return "liabilities"
-        if "033" in t or "asset" in t:
+        if "033" in t or "asset" in t or "الاصول" in n or "الموجودات" in n:
             return "assets"
         return None
     return hit(filename) or hit(" ".join(sheet_names or [])) or "any"
@@ -176,7 +195,7 @@ class SheetIndex(object):
 
     def header(self, col):
         """Readable header: the two nearest real header strings, top to bottom (unit notes left out)."""
-        keep = [p for p in self.header_parts(col) if not UNIT_NOTE.search(p)][:2]
+        keep = [p for p in self.header_parts(col) if not _is_unit_note(p)][:2]
         return " | ".join(reversed(keep))
 
     def column_ccy(self, col):
@@ -184,7 +203,7 @@ class SheetIndex(object):
         Thousand Iraqi Dinars)' note never overrides a column headed 'Euro'."""
         seen_total = False
         for p in self.header_parts(col):
-            if UNIT_NOTE.search(p):
+            if _is_unit_note(p):
                 continue
             code = column_currency(p)
             if code == "TOTAL":
@@ -344,7 +363,7 @@ def build_layout(tb, include_accounts=False, min_value=0.0):
             return
         targets.append({"id": len(targets), "sheet": sheet, "cell": "%s%d" % (get_column_letter(col_idx), row_idx),
                         "level": level, "label": label, "currency": ccy_key, "amount": float(amount),
-                        "family": family, "names": list(names), "currencies": [ccy_key]})
+                        "family": family, "names": list(names), "currencies": [ccy_key], "scope": "all"})
 
     for i, (level, label, vec, names) in enumerate(rows):
         r = i + 2
@@ -362,27 +381,34 @@ def build_layout(tb, include_accounts=False, min_value=0.0):
             for j, key in enumerate(keys):
                 add_target("TB Accounts", r, 4 + j, "Account", "%s / %s %s" % (bsm, acct, desc), key,
                            vec[key], family_of(bsm), [desc, bsm])
-    # a group that has a single child (or a grand total over one mapping) repeats the same figure:
-    # search it once, and highlight every pivot cell that carries it
-    # (a mapping held in one currency also equals its own 'Grand Total' column, for instance)
-    by_id = dict((t["id"], t) for t in targets)
-    seen = {}
-    for t in targets:
-        t["group"] = seen.setdefault((round(t["amount"], 2), t["family"]), t["id"])
-        if t["group"] != t["id"]:
-            prim = by_id[t["group"]]
-            prim["names"].extend(n for n in t["names"] if n not in prim["names"])
-            if t["currency"] not in prim["currencies"]:
-                prim["currencies"].append(t["currency"])
     return {"ccys": ccys, "keys": keys, "rows": rows, "acct_rows": acct_rows, "targets": targets}
 
 
 # ---------------------------------------------------------------- the search
 
+def group_targets(targets):
+    """A group that has a single child (or a mapping held in one currency, which also equals its own
+    'Grand Total' column) repeats the same figure: search it once, highlight every pivot cell carrying
+    it. Same amount in a different family or sheet scope is NOT the same target."""
+    by_id = dict((t["id"], t) for t in targets)
+    seen = {}
+    for t in targets:
+        t["group"] = seen.setdefault((round(t["amount"], 2), t["family"], t.get("scope", "all")), t["id"])
+        if t["group"] != t["id"]:
+            prim = by_id[t["group"]]
+            prim["names"].extend(n for n in t["names"] if n not in prim["names"])
+            if t["currency"] not in prim["currencies"]:
+                prim["currencies"].append(t["currency"])
+
+
 def _route(files, types, family):
     """Which files may hold a target of this family: those typed for it (plus 'search everything'
-    files); with none, every non-off-balance file. Off-balance files are never searched here."""
-    live = [f for f in files if types.get(f["label"], "any") != "offbalance"]
+    files); with none, every other file. Off-balance (OB) values are searched ONLY in Off-balance
+    files, and Off-balance files never receive Assets / Liabilities values."""
+    ty = lambda f: types.get(f["label"], "any")
+    if family == "offbalance":
+        return [f for f in files if ty(f) in ("offbalance", "any")]
+    live = [f for f in files if ty(f) != "offbalance"]
     if family in ("assets", "liabilities"):
         typed = [f for f in live if types.get(f["label"], "any") in (family, "any")]
         if any(types.get(f["label"], "any") == family for f in live):
@@ -390,26 +416,34 @@ def _route(files, types, family):
     return live
 
 
-def run_depth_search(tb, files, file_types, params=None):
+def run_depth_search(tb, files, file_types, params=None, externals=None):
     p = dict(DEFAULT_PARAMS)
     p.update({k: v for k, v in (params or {}).items() if v is not None})
     layout = build_layout(tb, include_accounts=bool(p["include_accounts"]), min_value=float(p["min_value"]))
     targets = layout["targets"]
+    # Outstanding Report pivots (Off-balance): header row 1, data from row 2, one target per number
+    for spec in externals or []:
+        for et in spec["targets"]:
+            if abs(et["amount"]) < max(float(p["min_value"]), 1e-9):
+                continue
+            targets.append({"id": len(targets), "sheet": spec["sheet"],
+                            "cell": "%s%d" % (get_column_letter(et["col"]), et["row"]), "level": et["level"],
+                            "label": et["label"], "currency": et["currency"], "amount": float(et["amount"]),
+                            "family": "offbalance", "names": list(et["names"]), "currencies": [et["currency"]],
+                            "scope": spec["scope"]})
+    group_targets(targets)
+    kws = [ar_norm(k.strip()) for k in str(p["maturity_keywords"]).split(",") if k.strip()]
+    mat_re = re.compile("|".join(re.escape(k) for k in kws), re.I) if kws else None
     types = {f["label"]: (file_types or {}).get(f["label"]) or guess_file_type(f["label"]) for f in files}
     scales = [1.0] + (list(SCALES_ALT) if p["allow_scale"] else [])
     tol_abs = float(p["tol_abs"])
     route_labels = dict((fam, set(x["label"] for x in _route(files, types, fam)))
-                        for fam in ("assets", "liabilities", "other"))
+                        for fam in ("assets", "liabilities", "other", "offbalance"))
     out_files = []
     for f in files:
         label = f["label"]
         entry = {"file": label, "type": types[label], "type_label": FILE_TYPE_LABELS.get(types[label], types[label]),
                  "skipped": False, "warnings": [], "hits": [], "unmatched": [], "stats": {}}
-        if types[label] == "offbalance":
-            entry["skipped"] = True
-            entry["warnings"].append("Off-balance files are not searched yet.")
-            out_files.append(entry)
-            continue
         try:
             idx = WorkbookIndex(f["path"], label)
         except Exception as exc:                        # unreadable / corrupt workbook
@@ -418,7 +452,16 @@ def run_depth_search(tb, files, file_types, params=None):
             out_files.append(entry)
             continue
         entry["warnings"].extend(idx.warnings)
+        mat_sheets = set(k for k, sh in enumerate(idx.sheets)
+                         if mat_re and (mat_re.search(sh.name) or mat_re.search(ar_norm(sh.name))))
         routed = [t for t in targets if t["group"] == t["id"] and label in route_labels[t["family"] or "other"]]
+        skipped_maturity = [t for t in routed if t.get("scope") == "maturity" and not mat_sheets]
+        if skipped_maturity:
+            entry["warnings"].append(
+                "No sheet in this file has a maturity/tenure name (%s), so the Outstanding Report bucket pivot "
+                "(%d values) was not searched here. Adjust the keywords if the sheet is named differently."
+                % (p["maturity_keywords"], len(skipped_maturity)))
+            routed = [t for t in routed if t not in skipped_maturity]
         matched_targets = set()
         n_conflict = 0
         for t in routed:
@@ -429,6 +472,8 @@ def run_depth_search(tb, files, file_types, params=None):
                     continue
                 win = tol_abs if s <= 1.0 else max(tol_abs, 0.5 * s)
                 for i in idx.find(absT, s, win):
+                    if t.get("scope") == "maturity" and int(idx.sidx[i]) not in mat_sheets:
+                        continue                        # bucket (tenure) values belong on the Maturity sheet only
                     v = float(idx.raw[i])
                     tol_c = tol_abs if s <= 1.0 else max(tol_abs, 0.5 * s * (10.0 ** (-_decimals(v))))
                     diff = abs(abs(v) * s - absT)
@@ -490,7 +535,8 @@ def run_depth_search(tb, files, file_types, params=None):
                           "targets_unmatched": len(routed) - len(matched_targets),
                           "hits": len(entry["hits"]), "currency_conflicts": n_conflict}
         out_files.append(entry)
-    return {"params": p, "types": types, "targets": targets, "files": out_files,
+    ext_store = [dict((k, v) for k, v in spec.items() if k != "targets") for spec in (externals or [])]
+    return {"params": p, "types": types, "targets": targets, "files": out_files, "externals": ext_store,
             "pivot_columns": [_col_title(k) for k in layout["keys"]]}
 
 
@@ -605,6 +651,33 @@ def write_annotated_workbook(path_in, path_out, label, tb, result, file_entry):
     wa.column_dimensions["A"].width = 24
     wa.column_dimensions["C"].width = 36
     wa.freeze_panes = "D2"
+
+    # -- Outstanding Report pivots (Off-balance): the same colours on the matched pivot cells
+    if file_entry["type"] in ("offbalance", "any"):
+        for spec in result.get("externals") or []:
+            we = wb.create_sheet(_unique_name(wb, spec["sheet"]))
+            we.append(list(spec["headers"]))
+            for c in we[1]:
+                c.font = Font(bold=True, color="FFFFFF")
+                c.fill = _fill("1F3864")
+            for row in spec["rows"]:
+                we.append(list(row))
+            for rr in spec["bold"]:
+                for c in we[rr]:
+                    c.font = Font(bold=True)
+            nl = spec["n_label"]
+            for row in we.iter_rows(min_row=2, min_col=nl + 1):
+                for cell in row:
+                    cell.number_format = '#,##0;[Red](#,##0);"-"'
+                    t = tb_by_cell[spec["sheet"]].get(cell.coordinate)
+                    if t and t["group"] in colour_of:
+                        cell.fill = _fill(colour_of[t["group"]])
+                        c = Comment("Found in:\n" + "\n".join(found_at[t["group"]][:8]), "Depth Search")
+                        c.width, c.height = 300, 40 + 18 * min(len(found_at[t["group"]]), 8)
+                        cell.comment = c
+            we.freeze_panes = we.cell(row=2, column=nl + 1)
+            for j in range(1, len(spec["headers"]) + 1):
+                we.column_dimensions[get_column_letter(j)].width = 30 if j <= nl else 18
 
     # -- Matching Report: what matches with what
     rep_name = _unique_name(wb, "Matching Report")

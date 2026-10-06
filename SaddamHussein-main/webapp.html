@@ -6,6 +6,7 @@
     <div class="step" data-page="trial"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6V2Z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg></span><span class="stepLabel">Trial Balance</span></div>
     <div class="step" data-page="pivot"><span class="stepIcon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 9v12"/></svg></span><span class="stepLabel">TB Pivot</span></div>
     <div class="step" data-page="subs"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 14v6h16v-6"/><path d="M12 3v11M7 9l5-5 5 5"/></svg></span><span class="stepLabel">Submissions</span></div>
+    <div class="step" data-page="offbal"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><rect x="3" y="4" width="18" height="16" rx="3"/></svg></span><span class="stepLabel">Off-Balance</span></div>
     <div class="step" data-page="depth"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 10.5h5M10.5 8v5"/></svg></span><span class="stepLabel">Depth Search</span></div>
     <div class="step" data-page="mapping"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle class="dotc" cx="6" cy="6" r="2.2"/><circle class="dotc" cx="6" cy="18" r="2.2"/><circle class="dotc" cx="18" cy="12" r="2.2"/><path d="M8 7l8 4M8 17l8-4"/></svg></span><span class="stepLabel">Mapping Studio</span></div>
     <div class="step" data-page="coverage"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M6 2h12v20H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></span><span class="stepLabel">Mapping Coverage</span></div>
@@ -13,6 +14,10 @@
     <div class="step" data-page="map"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle class="dotc" cx="5" cy="6" r="2"/><circle class="dotc" cx="5" cy="18" r="2"/><circle class="dotc" cx="19" cy="12" r="2"/><path d="M7 6h6a4 4 0 0 1 4 4M7 18h6a4 4 0 0 0 4-4"/></svg></span><span class="stepLabel">Reconciliation Map</span></div>
     <div class="step" data-page="export"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M4 19h16"/></svg></span><span class="stepLabel">Export</span></div>
   </nav>
+  <div class="langSwitch" id="langSwitch" role="group" aria-label="Language">
+    <button type="button" class="langBtn active" data-action="set-lang" data-lang="en">English</button>
+    <button type="button" class="langBtn" data-action="set-lang" data-lang="ar">العربية</button>
+  </div>
   <div class="railFoot"><span class="dot" id="statusDot"></span><span id="runStatus">Starting…</span></div>
 </div>
 
@@ -56,9 +61,23 @@
 
 <section id="subs" class="page">
 <div class="title"><div><span class="kicker">Step 4</span><h2>Upload Submission Files</h2><p>Upload up to eight workbooks, then choose exactly which sheets to read into the reconciliation.</p></div></div>
-<div class="upload"><input id="subFiles" type="file" accept=".xlsx,.xlsm" multiple><div class="uploadIcon"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div><h3>Select the submissions</h3><p>Assets, liabilities/capital, and other supporting submissions (max 8)</p><button type="button" class="secondary" data-action="choose-subs">Choose files</button></div>
+<div class="upload"><input id="subFiles" type="file" accept=".xlsx,.xlsm,.xls,.xlsb" multiple><div class="uploadIcon"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div><h3>Select the submissions</h3><p>Assets, liabilities/capital, and other supporting submissions (max 8)</p><button type="button" class="secondary" data-action="choose-subs">Choose files</button></div>
 <div class="actions"><button type="button" class="primary" id="btnUploadSubs" data-action="upload-subs">Inspect workbooks</button></div>
 <div id="subMessage"></div>
+<div id="langChoice" class="langCard" style="display:none">
+  <h3>Arabic content detected</h3>
+  <p id="langChoiceText"></p>
+  <p class="muted">Choose the language you want to work in, then press Proceed.</p>
+  <div class="langOptions">
+    <label class="langOpt"><input type="radio" name="workLang" value="en" data-action="work-lang"><div><b>English</b><span>Translate the submissions to English using your own dictionary, then work in English.</span></div></label>
+    <label class="langOpt"><input type="radio" name="workLang" value="ar" data-action="work-lang"><div><b>Arabic</b><span>Keep the submissions in Arabic and work on them as they are.</span></div></label>
+  </div>
+  <div id="dictBox" style="display:none">
+    <label class="dictLabel">Dictionary workbook (Arabic in column A, English in column B, header in row 1)</label>
+    <div class="dictRow"><input id="dictFile" type="file" accept=".xlsx,.xlsm"><button type="button" class="secondary" data-action="choose-dict">Choose dictionary</button><span id="dictName" class="muted"></span></div>
+  </div>
+  <div class="actions"><button type="button" class="primary" id="btnLangProceed" data-action="proceed-lang">Proceed</button></div>
+</div>
 <div id="sheetPicker"></div>
 <div class="actions" id="extractActions" style="display:none"><button type="button" class="primary" id="btnExtractSubs" data-action="extract-subs">Extract selected sheets <svg viewBox="0 0 24 24" class="btnIcon"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div>
 <div id="subExtractMessage"></div>
@@ -66,12 +85,30 @@
 <div class="tableWrap"><table id="subTable"></table></div>
 </section>
 
+<section id="offbal" class="page">
+<div class="title"><div><span class="kicker">Off-balance</span><h2>Outstanding Report</h2><p>Upload the Outstanding Report. The raw-data sheet and header row are found automatically, Equ-IQD is cleaned and validated, and two pivots are built. Depth Search then looks for their values in the Off-balance (064) submission, with the Bucket pivot searched on its Maturity sheet only.</p></div></div>
+<div class="upload"><input id="obFile" type="file" accept=".xlsx,.xlsm,.xls,.xlsb"><div class="uploadIcon"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div><h3>Drop the Outstanding Report here</h3><p>Excel workbook with the raw outstanding-report data</p><button type="button" class="secondary" data-action="choose-ob">Choose file</button></div>
+<div class="actions"><button type="button" class="primary" id="btnUploadOb" data-action="upload-ob">Build pivots</button>
+  <button type="button" class="secondary" id="btnOutstandingDl" data-action="download-outstanding" style="display:none">Download pivot workbook</button></div>
+<div id="obMessage"></div><div id="obKpis" class="kpis"></div>
+<div id="obBody" style="display:none">
+  <h3 class="subhead">Pivot 1 · Category, LC/GTEE and Currency by Bucket</h3>
+  <p class="muted">Filters: none · Columns: Bucket · Values: Sum of Equ-IQD</p>
+  <div class="tableWrap"><table id="obPivot1"></table></div>
+  <h3 class="subhead">Pivot 2 · LC/GTEE by Currency</h3>
+  <div class="obFilter"><label>Filter: CATEGORY <select id="obCategory" data-action="ob-category"></select></label></div>
+  <div class="tableWrap"><table id="obPivot2"></table></div>
+  <details class="obValidation"><summary>Validation details</summary><div class="tableWrap"><table id="obValidation"></table></div></details>
+</div>
+</section>
+
 <section id="depth" class="page">
 <div class="title"><div><span class="kicker">Search</span><h2>Depth Search</h2><p>Look for every Trial Balance pivot value (BS-mapping and group level) in every non-zero cell of every sheet of each submission file — schedules and matrix sheets included. Each file gets its own workbook: your original sheets, the TB pivot, a matching report, and matched cells highlighted in the same colour on both sides.</p></div></div>
+<div class="notice good" id="depthExtra" style="display:none"></div>
 <div class="notice" id="depthPrereq">Upload the Trial Balance and the submission workbooks first (the sheets do not need to be extracted).</div>
 
 <h3 class="subhead">1 · What is each file?</h3>
-<p class="muted depthHint">Assets values (A-…) are searched in the Assets file, liabilities (L-…) in the Liabilities file. Off-balance files are skipped for now. The type is guessed from the file name — change it if needed.</p>
+<p class="muted depthHint">Assets values (A-…) are searched in the Assets file, liabilities (L-…) in the Liabilities file, and Off-balance values (OB-… plus the Outstanding Report pivots) only in the Off-balance file. The type is guessed from the file name — change it if needed.</p>
 <div id="depthFiles"></div>
 
 <h3 class="subhead">2 · Search settings</h3>
@@ -79,6 +116,7 @@
   <label>Smallest TB value to search<input id="depthMin" type="number" value="1000" min="0" step="any"></label>
   <label>Smallest TB value for a ×1,000 / ×1,000,000 match<input id="depthMinScaled" type="number" value="100000" min="0" step="any"></label>
   <label>Tolerance (absolute)<input id="depthTol" type="number" value="1" min="0" step="any"></label>
+  <label>Maturity sheet keywords (Off-balance bucket pivot)<input id="depthMat" type="text" value="maturity, tenor, tenure, استحقاق"></label>
   <label class="check"><input id="depthScale" type="checkbox" checked> Also try thousands / millions (sheets stated "in thousands")</label>
   <label class="check"><input id="depthSign" type="checkbox" checked> Accept equal-and-opposite sign</label>
   <label class="check"><input id="depthAccounts" type="checkbox"> Also search individual account values (more matches, more noise)</label>

@@ -13,6 +13,17 @@ try:
 except Exception as _e:
     DS=None; DS_ERROR=str(_e)
 
+try:
+    from bahrain_iraq_algorithm import translation as TR
+    TR_ERROR=None
+except Exception as _e:
+    TR=None; TR_ERROR=str(_e)
+try:
+    from bahrain_iraq_algorithm import outstanding_report as OR
+    OR_ERROR=None
+except Exception as _e:
+    OR=None; OR_ERROR=str(_e)
+
 SESSIONS={}
 
 def get_session(sid=None):
@@ -85,15 +96,25 @@ def submissions_upload():
     if not fs:return jsonify({'ok':False,'error':'Upload at least one submission workbook.'}),400
     eng=ReconEngine(); d['sub_files']=[]; d['sub_inspect']={}
     out=[]
+    d['translation']=None; d['work_language']=None
     for i,f in enumerate(fs[:8],1):
-        path=save_upload(f,d,f'sub{i}'); label=Path(f.filename).name
+        label=Path(f.filename or '').name
+        if Path(label).suffix.lower() not in ('.xlsx','.xlsm','.xls','.xlsb'):
+            return jsonify({'ok':False,'error':'%s is not an Excel workbook (.xlsx, .xlsm, .xls or .xlsb).'%label}),400
+        path=save_upload(f,d,f'sub{i}')
+        if Path(label).suffix.lower() in ('.xls','.xlsb'):
+            if TR is None: return jsonify({'ok':False,'error':'Reading .xls/.xlsb needs the latest bahrain_iraq_algorithm library. Detail: %s'%TR_ERROR}),400
+            path=TR.to_xlsx(path,d['dir'])          # the rest of the app reads .xlsx
         d['sub_files'].append({'label':label,'path':path})
         sheets=eng.inspect_workbook(path)
         d['sub_inspect'][label]=sheets
         guessed=DS.guess_file_type(label,[s['sheet'] for s in sheets]) if DS else 'any'
-        out.append({'file':label,'sheets':sheets,'guessed_type':guessed})
+        ar=TR.count_arabic(path) if TR else {'cells':0,'sheets':[],'sheet_names':[],'sample':[]}
+        out.append({'file':label,'sheets':sheets,'guessed_type':guessed,'arabic_cells':ar['cells'],
+                    'arabic_sheets':ar['sheets'],'arabic_sample':ar['sample']})
     d['depth']=None
-    return jsonify({'ok':True,'files':out})
+    has_ar=bool(TR) and any(o['arabic_cells'] or any(TR.contains_arabic(x['sheet']) for x in o['sheets']) for o in out)
+    return jsonify({'ok':True,'files':out,'has_arabic':has_ar})
 
 @app.route('/api/submissions/extract',methods=['POST','OPTIONS'])
 def submissions_extract():
@@ -257,7 +278,9 @@ def depth_run():
     params={'min_value':float(ps.get('min_value',1000)),'min_scaled':float(ps.get('min_scaled',100000)),
             'tol_abs':float(ps.get('tol_abs',1)),'allow_scale':bool(ps.get('allow_scale',True)),
             'allow_sign':bool(ps.get('allow_sign',True)),'include_accounts':bool(ps.get('include_accounts',False))}
-    res=DS.run_depth_search(d['tb'],d['sub_files'],body.get('file_types') or {},params)
+    if ps.get('maturity_keywords'): params['maturity_keywords']=str(ps['maturity_keywords'])
+    externals=OR.depth_specs(d['outstanding']['result']) if (OR is not None and d.get('outstanding')) else None
+    res=DS.run_depth_search(d['tb'],d['sub_files'],body.get('file_types') or {},params,externals=externals)
     d['depth']=res
     tmap={t['id']:t for t in res['targets']}
     files=[]
@@ -266,9 +289,10 @@ def depth_run():
                       'stats':f['stats'],'hits':f['hits'][:3000],'hits_total':len(f['hits']),
                       'unmatched':[{'id':i,'label':tmap[i]['label'],'level':tmap[i]['level'],'currency':tmap[i]['currency'],
                                     'amount':tmap[i]['amount']} for i in f['unmatched']][:3000]})
-    targets={t['id']:{'label':t['label'],'level':t['level'],'currency':t['currency'],'amount':t['amount'],'cell':t['cell']}
-             for t in res['targets']}
-    return jsonify({'ok':True,'files':files,'targets':targets,'params':res['params']})
+    targets={t['id']:{'label':t['label'],'level':t['level'],'currency':t['currency'],'amount':t['amount'],'cell':t['cell'],
+                      'sheet':t['sheet'],'family':t['family']} for t in res['targets']}
+    ext=[{'sheet':e['sheet'],'scope':e['scope'],'category':e.get('category')} for e in res.get('externals',[])]
+    return jsonify({'ok':True,'files':files,'targets':targets,'params':res['params'],'externals':ext})
 
 @app.route('/api/depth-search/download',methods=['GET'])
 def depth_download():
@@ -301,3 +325,123 @@ def depth_download_all():
         entries.append((name,out))
     if not entries:return jsonify({'ok':False,'error':'No searched files to download.'}),400
     return bytes_response(DS.build_zip(entries),'Depth_Search_Outputs.zip','application/zip')
+
+
+# ---------------- Arabic submissions: translate with the user's dictionary, or keep working in Arabic ----------------
+
+def _tr_unavailable():
+    return jsonify({'ok':False,'error':'Translation needs the latest bahrain_iraq_algorithm library in your project '
+                    '(copy translation.py and engine.py into it, then restart the backend). Detail: %s'%TR_ERROR}),400
+
+def _file_meta(d,eng):
+    out=[]
+    for sf in d['sub_files']:
+        sheets=eng.inspect_workbook(sf['path']); d['sub_inspect'][sf['label']]=sheets
+        ar=TR.count_arabic(sf['path'])
+        out.append({'file':sf['label'],'sheets':sheets,'arabic_cells':ar['cells'],'arabic_sheets':ar['sheets'],'arabic_sample':ar['sample'],
+                    'guessed_type':DS.guess_file_type(sf['label'],[x['sheet'] for x in sheets]) if DS else 'any'})
+    return out
+
+@app.route('/api/submissions/translate',methods=['POST','OPTIONS'])
+def submissions_translate():
+    if TR is None: return _tr_unavailable()
+    sid,d=get_session(request.form.get('session_id')); f=request.files.get('dictionary')
+    if not d['sub_files']:return jsonify({'ok':False,'error':'Upload the submission workbooks first.'}),400
+    if not f:return jsonify({'ok':False,'error':'Upload your dictionary workbook (Arabic in column A, English in column B, header in row 1).'}),400
+    dpath=save_upload(f,d,'dictionary')
+    try: dictionary=TR.load_dictionary(dpath)
+    except Exception as exc: return jsonify({'ok':False,'error':'Could not read the dictionary workbook: %s'%exc}),400
+    if not dictionary:return jsonify({'ok':False,'error':'The dictionary has no usable rows (Arabic in column A, English in column B, header in row 1).'}),400
+    eng=ReconEngine(); stats=[]; missing=set()
+    for sf in d['sub_files']:
+        base=sf.get('orig_path') or sf['path']; label=sf['label']
+        ar=TR.count_arabic(base)
+        if not ar['cells'] and not ar['sheet_names']:
+            stats.append({'file':label,'translated_cells':0,'translated_sheets':0,'missing_terms':0,'skipped':True}); continue
+        ext='.xlsm' if base.lower().endswith('.xlsm') else '.xlsx'
+        out=os.path.join(d['dir'],'translated_'+Path(base).stem+ext)
+        st=TR.translate_workbook(base,dictionary,out)
+        sf['orig_path']=base; sf['path']=out; missing|=st['missing_terms']
+        stats.append({'file':label,'translated_cells':st['translated_cells'],'translated_sheets':st['translated_sheets'],
+                      'missing_terms':len(st['missing_terms']),'skipped':False})
+    missing_path=os.path.join(d['dir'],'Missing_Arabic_Words.xlsx'); TR.write_missing_terms(missing,missing_path)
+    d['translation']={'dictionary':f.filename,'entries':len(dictionary),'missing_count':len(missing),'missing_path':missing_path}
+    d['work_language']='en'; d['sub_df']=None; d['suggestions']=None; d['depth']=None
+    return jsonify({'ok':True,'files':_file_meta(d,eng),'stats':stats,'entries':len(dictionary),
+                    'missing_count':len(missing),'missing_sample':sorted(missing)[:40]})
+
+@app.route('/api/submissions/language',methods=['POST','OPTIONS'])
+def submissions_language():
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    if body.get('mode') not in ('ar','en'):return jsonify({'ok':False,'error':'Choose Arabic or English.'}),400
+    d['work_language']=body['mode']
+    return jsonify({'ok':True,'mode':d['work_language']})
+
+@app.route('/api/submissions/translation-download',methods=['GET'])
+def translation_download():
+    if TR is None: return _tr_unavailable()
+    sid=request.args.get('session_id'); _,d=get_session(sid); kind=request.args.get('kind','missing')
+    if kind=='missing':
+        path=(d.get('translation') or {}).get('missing_path')
+        if not path or not os.path.exists(path):return jsonify({'ok':False,'error':'No translation has been run yet.'}),400
+        return xlsx_response(path,'Missing_Arabic_Words.xlsx')
+    label=request.args.get('file','')
+    sf=next((x for x in d['sub_files'] if x['label']==label),None)
+    if not sf or not sf.get('orig_path'):return jsonify({'ok':False,'error':'That file was not translated.'}),400
+    return xlsx_response(sf['path'],Path(label).stem+'_translated'+Path(sf['path']).suffix)
+
+
+# ---------------- Off-balance: the Outstanding Report and its two pivots ----------------
+
+def _ob_unavailable():
+    return jsonify({'ok':False,'error':'The Outstanding Report needs the latest bahrain_iraq_algorithm library in your project '
+                    '(copy outstanding_report.py and engine.py into it, then restart the backend). Detail: %s'%OR_ERROR}),400
+
+def _ob_payload(d):
+    ob=d['outstanding']; res=ob['result']
+    def flat(f):
+        return {'title':f['title'],'label_cols':f['label_cols'],'columns':f['columns'],'category':f.get('category'),
+                'rows':[{'level':r['level'],'labels':r['labels'],'values':r['values'],'total':r['total']} for r in f['rows']]}
+    return {'ok':True,'source':ob['name'],'sheet':res['info']['sheet'],'header_row':res['info']['header_row'],
+            'categories':res['categories'],'selected_category':res['selected_category'],'warnings':res['warnings'],
+            'validation':[[k,v if isinstance(v,(int,float)) else str(v)] for k,v in res['validation']],
+            'pivot1':flat(res['pivot1']['flat']),'pivot2':flat(res['pivot2']['flat'])}
+
+@app.route('/api/outstanding/upload',methods=['POST','OPTIONS'])
+def outstanding_upload():
+    if OR is None: return _ob_unavailable()
+    sid,d=get_session(request.form.get('session_id')); f=request.files.get('file')
+    if not f:return jsonify({'ok':False,'error':'Upload the Outstanding Report workbook.'}),400
+    name=Path(f.filename or 'outstanding.xlsx').name
+    path=save_upload(f,d,'outstanding')
+    if Path(name).suffix.lower() in ('.xls','.xlsb'):
+        if TR is None: return _tr_unavailable()
+        path=TR.to_xlsx(path,d['dir'])
+    try:
+        res=OR.process_outstanding(path,name,category=request.form.get('category') or None,sheet=request.form.get('sheet') or None)
+    except OR.OutstandingError as exc:
+        return jsonify({'ok':False,'error':str(exc)}),400
+    d['outstanding']={'path':path,'name':name,'result':res}; d['depth']=None
+    return jsonify(_ob_payload(d))
+
+@app.route('/api/outstanding/category',methods=['POST','OPTIONS'])
+def outstanding_category():
+    if OR is None: return _ob_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    if not d.get('outstanding'):return jsonify({'ok':False,'error':'Upload the Outstanding Report first.'}),400
+    res=d['outstanding']['result']
+    try: p2=OR.build_lcgtee_currency_pivot(res['df'],body.get('category') or None)
+    except OR.OutstandingError as exc: return jsonify({'ok':False,'error':str(exc)}),400
+    res['pivot2']=p2; res['selected_category']=p2['flat']['category']; d['depth']=None
+    return jsonify(_ob_payload(d))
+
+@app.route('/api/outstanding/download',methods=['GET'])
+def outstanding_download():
+    if OR is None: return _ob_unavailable()
+    sid=request.args.get('session_id'); _,d=get_session(sid)
+    if not d.get('outstanding'):return jsonify({'ok':False,'error':'Upload the Outstanding Report first.'}),400
+    path=os.path.join(d['dir'],'Outstanding_Report_IRAQ_Pivot_Output.xlsx')
+    OR.create_output_workbook(d['outstanding']['result'],path)
+    return xlsx_response(path,'Outstanding_Report_IRAQ_Pivot_Output.xlsx')

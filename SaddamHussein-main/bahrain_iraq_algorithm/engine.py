@@ -15,6 +15,28 @@ from openpyxl.utils import get_column_letter, column_index_from_string
 LOCAL_CCY = "IQD"
 FRX_CODE = "FRX"
 
+# ---- Arabic support: submissions may arrive in Arabic (or be translated first) ----
+# Arabic-Indic / Persian digits and their separators -> ASCII, so numbers stored as
+# text ("١٢٣٬٤٥٦") are still read as numbers.
+ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٬٫", "01234567890123456789,.")
+_AR_RE = re.compile(r"[؀-ۿݐ-ݿࢠ-ࣿ]")
+_AR_DIAC = re.compile(r"[ً-ٰٟۖ-ۭ]")
+
+def normalize_digits(s):
+    return str(s).translate(ARABIC_DIGITS)
+
+def ar_norm(text):
+    """Fold the spelling variants Arabic headers use (alef/ya/ta-marbuta forms, tatweel,
+    diacritics) so one pattern matches them all. Text without Arabic is returned unchanged."""
+    t = str(text or "")
+    if not _AR_RE.search(t):
+        return t
+    t = t.replace("ـ", "")
+    for a in "أإآٱ":
+        t = t.replace(a, "ا")
+    t = t.replace("ى", "ي").replace("ة", "ه")
+    return _AR_DIAC.sub("", t)
+
 ALIASES = {
  "account": ["account", "gl account", "account no", "account number"],
  "account_desc": ["account desc", "account description", "gl description"],
@@ -50,19 +72,41 @@ CURRENCY_NAME_PATTERNS = [
     (re.compile(r"\bdollars?\b", re.I), "USD"),
     (re.compile(r"\bdirhams?\b", re.I), "AED"),
 ]
+# the same names in Arabic, written in ar_norm() form (ة->ه, ى->ي, alef variants -> ا)
+CURRENCY_NAME_PATTERNS_AR = [
+    (re.compile(r"(دينار|دنانير)\s+(?:ال)?عراقي"), "IQD"),
+    (re.compile(r"(دينار|دنانير)\s+(?:ال)?بحريني"), "BHD"),
+    (re.compile(r"(دينار|دنانير)\s+(?:ال)?كويتي"), "KWD"),
+    (re.compile(r"(دينار|دنانير)\s+(?:ال)?اردني"), "JOD"),
+    (re.compile(r"ريال\s+(?:ال)?سعودي|ريالات\s+(?:ال)?سعودي"), "SAR"),
+    (re.compile(r"ريال\s+(?:ال)?قطري"), "QAR"),
+    (re.compile(r"ريال\s+(?:ال)?عماني"), "OMR"),
+    (re.compile(r"درهم\s+(?:ال)?اماراتي|دراهم\s+(?:ال)?اماراتي"), "AED"),
+    (re.compile(r"استرليني"), "GBP"),
+    (re.compile(r"فرنك\s+(?:ال)?سويسري"), "CHF"),
+    (re.compile(r"ين\s+(?:ال)?ياباني"), "JPY"),
+    (re.compile(r"يوان"), "CNY"),
+    (re.compile(r"يورو"), "EUR"),
+    (re.compile(r"دولار"), "USD"),
+    (re.compile(r"درهم|دراهم"), "AED"),
+]
 def match_currency_name(text):
     for pat, code in CURRENCY_NAME_PATTERNS:
         if pat.search(text): return code
+    n = ar_norm(text)
+    if _AR_RE.search(n):
+        for pat, code in CURRENCY_NAME_PATTERNS_AR:
+            if pat.search(n): return code
     return None
 
-TOTAL_PATTERN = re.compile(r"\b(grand\s+total|sub\s*-?\s*total|total)\b", re.I)
+TOTAL_PATTERN = re.compile(r"\b(grand\s+total|sub\s*-?\s*total|total)\b|(?:ال)?مجموع|(?:ال)?[اأإ]جمال[يى]|الكلي", re.I)
 # a column-index / cross-reference row some regulatory templates print under
 # the real header — e.g. "2=(3+4+5+6)" — reads as plausible-looking small
 # integers per column and must never be mistaken for a real data line.
 FORMULA_REF_PATTERN = re.compile(r"\d+\s*=\s*\([^)]*[+\-][^)]*\)")
-TOTAL_PREFIX = re.compile(r"^(grand\s+total\s+of\s+|grand\s+total\s+|sub[\s-]?total\s+of\s+|sub[\s-]?total\s+|total\s+of\s+|total\s+)", re.I)
-SCALE_THOUSANDS = re.compile(r"\(?'?000\b\)?|in\s+thousands?\b|\bthousands?\b", re.I)
-SCALE_MILLIONS = re.compile(r"\(?'?mn'?\)?|in\s+millions?\b|\bmillions?\b", re.I)
+TOTAL_PREFIX = re.compile(r"^(grand\s+total\s+of\s+|grand\s+total\s+|sub[\s-]?total\s+of\s+|sub[\s-]?total\s+|total\s+of\s+|total\s+|(?:ال)?مجموع\s+|(?:ال)?[اأإ]جمال[يى]\s+)", re.I)
+SCALE_THOUSANDS = re.compile(r"\(?'?000\b\)?|in\s+thousands?\b|\bthousands?\b|\b(?:ب)?(?:ال)?[آأا]لاف\b|\b(?:ب)?(?:ال)?[أا]لف\b", re.I)
+SCALE_MILLIONS = re.compile(r"\(?'?mn'?\)?|in\s+millions?\b|\bmillions?\b|\b(?:ب)?(?:ال)?ملايين\b|\b(?:ب)?(?:ال)?مليون\b", re.I)
 HIERARCHY_DELIMS = [" > ", " / ", " - ", " – ", " :: ", " | "]
 STOPWORDS = {"and","the","of","for","in","on","to","a","an","with","&"}
 # common reporting-scale multipliers to try numerically when a header's text
@@ -90,15 +134,16 @@ def forward_fill_headers(headers):
 
 def detect_scale(text):
     t = str(text or "")
+    t = t + " " + ar_norm(t)
     if SCALE_THOUSANDS.search(t): return 1000.0
     if SCALE_MILLIONS.search(t): return 1000000.0
     return 1.0
 
 def norm(v):
-    return re.sub(r"[^a-z0-9]+", " ", str(v or "").strip().lower()).strip()
+    return re.sub(r"[^a-z0-9؀-ۿ]+", " ", normalize_digits(ar_norm(str(v or "").strip())).lower()).strip()
 
 def norm_tokens(v):
-    t = re.sub(r"[^a-z0-9\s]", " ", str(v or "").lower())
+    t = re.sub(r"[^a-z0-9؀-ۿ\s]", " ", normalize_digits(ar_norm(str(v or ""))).lower())
     return [w for w in t.split() if w and w not in STOPWORDS]
 
 def text_similarity(a, b):
@@ -113,12 +158,13 @@ def classify_currency_header(text):
     t = str(text or "").strip()
     if not t:
         return None
-    is_total = bool(TOTAL_PATTERN.search(t))
+    tn = ar_norm(t)
+    is_total = bool(TOTAL_PATTERN.search(t) or TOTAL_PATTERN.search(tn))
     m = CURRENCY_PATTERN.search(t)
     code = m.group(1).upper() if m else None
     if not code:
         code = match_currency_name(t)
-    if not code and LOCAL_CCY_PATTERN.search(t):
+    if not code and (LOCAL_CCY_PATTERN.search(t) or re.search(r"العمله\s+المحليه", tn)):
         code = "LCY"
     if is_total and code:
         return f"TOTAL_{code}"
@@ -199,9 +245,13 @@ class ReconEngine:
     def detect_header(self, raw, max_rows=80):
         best=(None,-1)
         vocabulary=set(sum(ALIASES.values(),[])) | {'amount','description','line item','particulars','total'}
+        # the same header words as they appear in Arabic statements (norm() folds the spelling variants)
+        vocabulary |= {'البيان','المبلغ','الرصيد','المجموع','الاجمالي','الاصول','المطلوبات','الخصوم','الموجودات',
+                       'الوصف','التسلسل','اسم الحساب','رقم الحساب','العمله','الحساب','البند'}
+        hdr_words=['account','amount','balance','mapping','description','حساب','مبلغ','رصيد','بيان','وصف']
         for i in range(min(max_rows,len(raw))):
             cells=[norm(x) for x in raw.iloc[i].tolist() if pd.notna(x)]
-            score=sum(3 for c in cells if c in vocabulary)+sum(1 for c in cells if any(k in c for k in ['account','amount','balance','mapping','description']))
+            score=sum(3 for c in cells if c in vocabulary)+sum(1 for c in cells if any(k in c for k in hdr_words))
             if len(set(cells))>=3 and score>best[1]: best=(i,score)
         return best if best[1]>=3 else (None,best[1])
 
@@ -289,7 +339,7 @@ class ReconEngine:
     def _to_number(self, v):
         if isinstance(v,(int,float,np.number)) and not pd.isna(v): return float(v)
         if isinstance(v,str):
-            s=v.replace(',','').replace('(','-').replace(')','').replace('%','').strip()
+            s=normalize_digits(v).replace(',','').replace('(','-').replace(')','').replace('%','').strip()
             if re.fullmatch(r'-?\d+(\.\d+)?', s) and s not in ('','-'): return float(s)
         return None
 
