@@ -6,6 +6,7 @@
     <div class="step" data-page="trial"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6V2Z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg></span><span class="stepLabel">Trial Balance</span></div>
     <div class="step" data-page="pivot"><span class="stepIcon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 9v12"/></svg></span><span class="stepLabel">TB Pivot</span></div>
     <div class="step" data-page="subs"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 14v6h16v-6"/><path d="M12 3v11M7 9l5-5 5 5"/></svg></span><span class="stepLabel">Submissions</span></div>
+    <div class="step" data-page="depth"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 10.5h5M10.5 8v5"/></svg></span><span class="stepLabel">Depth Search</span></div>
     <div class="step" data-page="mapping"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle class="dotc" cx="6" cy="6" r="2.2"/><circle class="dotc" cx="6" cy="18" r="2.2"/><circle class="dotc" cx="18" cy="12" r="2.2"/><path d="M8 7l8 4M8 17l8-4"/></svg></span><span class="stepLabel">Mapping Studio</span></div>
     <div class="step" data-page="coverage"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M6 2h12v20H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></span><span class="stepLabel">Mapping Coverage</span></div>
     <div class="step" data-page="results"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><path d="m8 12.5 2.6 2.6L16 9.6"/></svg></span><span class="stepLabel">Recon Results</span></div>
@@ -63,6 +64,30 @@
 <div id="subExtractMessage"></div>
 <div class="title" id="subDownloadRow" style="display:none;margin-top:6px"><div><h3 style="margin:0">Extracted lines</h3><p>The cleaned, currency-tagged lines read from your selected sheets</p></div><button type="button" class="secondary" data-action="download-submissions">Download submissions file</button></div>
 <div class="tableWrap"><table id="subTable"></table></div>
+</section>
+
+<section id="depth" class="page">
+<div class="title"><div><span class="kicker">Search</span><h2>Depth Search</h2><p>Look for every Trial Balance pivot value (BS-mapping and group level) in every non-zero cell of every sheet of each submission file — schedules and matrix sheets included. Each file gets its own workbook: your original sheets, the TB pivot, a matching report, and matched cells highlighted in the same colour on both sides.</p></div></div>
+<div class="notice" id="depthPrereq">Upload the Trial Balance and the submission workbooks first (the sheets do not need to be extracted).</div>
+
+<h3 class="subhead">1 · What is each file?</h3>
+<p class="muted depthHint">Assets values (A-…) are searched in the Assets file, liabilities (L-…) in the Liabilities file. Off-balance files are skipped for now. The type is guessed from the file name — change it if needed.</p>
+<div id="depthFiles"></div>
+
+<h3 class="subhead">2 · Search settings</h3>
+<div class="depthSettings">
+  <label>Smallest TB value to search<input id="depthMin" type="number" value="1000" min="0" step="any"></label>
+  <label>Smallest TB value for a ×1,000 / ×1,000,000 match<input id="depthMinScaled" type="number" value="100000" min="0" step="any"></label>
+  <label>Tolerance (absolute)<input id="depthTol" type="number" value="1" min="0" step="any"></label>
+  <label class="check"><input id="depthScale" type="checkbox" checked> Also try thousands / millions (sheets stated "in thousands")</label>
+  <label class="check"><input id="depthSign" type="checkbox" checked> Accept equal-and-opposite sign</label>
+  <label class="check"><input id="depthAccounts" type="checkbox"> Also search individual account values (more matches, more noise)</label>
+</div>
+<div class="actions"><button type="button" class="primary" id="btnDepthRun" data-action="run-depth">Run depth search</button>
+  <button type="button" class="secondary" id="btnDepthAll" data-action="download-depth-all" style="display:none">Download all outputs (zip)</button></div>
+<div id="depthMessage"></div>
+<input class="search" id="depthFilter" placeholder="Filter results (TB item, sheet, cell, row label, column…)" style="display:none;margin-top:14px">
+<div id="depthResults"></div>
 </section>
 
 <section id="mapping" class="page">

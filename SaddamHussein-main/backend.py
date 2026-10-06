@@ -5,6 +5,13 @@ from flask import request, jsonify, Response
 HERE=os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
 if HERE not in sys.path: sys.path.insert(0,HERE)
 from bahrain_iraq_algorithm import ReconEngine
+# depth search lives in its own module; if the project library is older than this backend, keep the
+# rest of the app working and report a clear message from the depth-search endpoints instead
+try:
+    from bahrain_iraq_algorithm import depth_search as DS
+    DS_ERROR=None
+except Exception as _e:
+    DS=None; DS_ERROR=str(_e)
 
 SESSIONS={}
 
@@ -19,7 +26,10 @@ def get_session(sid=None):
 # so build the attachment response by hand to work on any Flask version Dataiku ships.
 def xlsx_response(path,filename):
     with open(path,'rb') as fh: data=fh.read()
-    return Response(data,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    return bytes_response(data,filename,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+def bytes_response(data,filename,mimetype):
+    return Response(data,mimetype=mimetype,
                     headers={'Content-Disposition':'attachment; filename="%s"'%filename,'Content-Length':str(len(data))})
 
 def save_upload(f,d,prefix):
@@ -80,7 +90,9 @@ def submissions_upload():
         d['sub_files'].append({'label':label,'path':path})
         sheets=eng.inspect_workbook(path)
         d['sub_inspect'][label]=sheets
-        out.append({'file':label,'sheets':sheets})
+        guessed=DS.guess_file_type(label,[s['sheet'] for s in sheets]) if DS else 'any'
+        out.append({'file':label,'sheets':sheets,'guessed_type':guessed})
+    d['depth']=None
     return jsonify({'ok':True,'files':out})
 
 @app.route('/api/submissions/extract',methods=['POST','OPTIONS'])
@@ -218,3 +230,74 @@ def download():
     path=os.path.join(d['dir'],'Bahrain_Iraq_Reconciliation_Output.xlsx')
     eng.export(d['tb'],d['pivot'],d['sub_df'],d['recon'],d.get('suggestions'),flat_lineage,path,mapping_coverage=d.get('mapping_coverage'))
     return xlsx_response(path,'Bahrain_Iraq_Reconciliation_Output.xlsx')
+
+
+# ---------------- Depth search: TB pivot values -> every non-zero cell of every sheet ----------------
+
+def _depth_unavailable():
+    return jsonify({'ok':False,'error':'Depth search needs the latest bahrain_iraq_algorithm library in your project '
+                    '(copy depth_search.py and engine.py into it, then restart the backend). Detail: %s'%DS_ERROR}),400
+
+def _depth_out_path(d,label):
+    ext='.xlsm' if label.lower().endswith('.xlsm') else '.xlsx'
+    safe=''.join(ch if ch.isalnum() or ch in '-_.' else '_' for ch in Path(label).stem)
+    return os.path.join(d['dir'],'depth_'+safe+ext), safe+'_DepthSearch'+ext
+
+def _depth_mime(path):
+    return 'application/vnd.ms-excel.sheet.macroEnabled.12' if path.lower().endswith('.xlsm') else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
+@app.route('/api/depth-search/run',methods=['POST','OPTIONS'])
+def depth_run():
+    if DS is None: return _depth_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    if d['tb'] is None:return jsonify({'ok':False,'error':'Upload and process the Trial Balance first.'}),400
+    if not d['sub_files']:return jsonify({'ok':False,'error':'Upload the submission workbooks first (Submissions step).'}),400
+    ps=body.get('params') or {}
+    params={'min_value':float(ps.get('min_value',1000)),'min_scaled':float(ps.get('min_scaled',100000)),
+            'tol_abs':float(ps.get('tol_abs',1)),'allow_scale':bool(ps.get('allow_scale',True)),
+            'allow_sign':bool(ps.get('allow_sign',True)),'include_accounts':bool(ps.get('include_accounts',False))}
+    res=DS.run_depth_search(d['tb'],d['sub_files'],body.get('file_types') or {},params)
+    d['depth']=res
+    tmap={t['id']:t for t in res['targets']}
+    files=[]
+    for f in res['files']:
+        files.append({'file':f['file'],'type':f['type'],'type_label':f['type_label'],'skipped':f['skipped'],'warnings':f['warnings'],
+                      'stats':f['stats'],'hits':f['hits'][:3000],'hits_total':len(f['hits']),
+                      'unmatched':[{'id':i,'label':tmap[i]['label'],'level':tmap[i]['level'],'currency':tmap[i]['currency'],
+                                    'amount':tmap[i]['amount']} for i in f['unmatched']][:3000]})
+    targets={t['id']:{'label':t['label'],'level':t['level'],'currency':t['currency'],'amount':t['amount'],'cell':t['cell']}
+             for t in res['targets']}
+    return jsonify({'ok':True,'files':files,'targets':targets,'params':res['params']})
+
+@app.route('/api/depth-search/download',methods=['GET'])
+def depth_download():
+    if DS is None: return _depth_unavailable()
+    sid=request.args.get('session_id'); _,d=get_session(sid); label=request.args.get('file','')
+    res=d.get('depth')
+    if not res:return jsonify({'ok':False,'error':'Run the depth search first.'}),400
+    entry=next((f for f in res['files'] if f['file']==label),None)
+    src=next((s for s in d['sub_files'] if s['label']==label),None)
+    if not entry or not src:return jsonify({'ok':False,'error':'That file was not part of the last depth search.'}),400
+    if entry['skipped']:return jsonify({'ok':False,'error':'That file was skipped: %s'%'; '.join(entry['warnings'])}),400
+    out,name=_depth_out_path(d,label)
+    DS.write_annotated_workbook(src['path'],out,label,d['tb'],res,entry)
+    with open(out,'rb') as fh: data=fh.read()
+    return bytes_response(data,name,_depth_mime(out))
+
+@app.route('/api/depth-search/download-all',methods=['GET'])
+def depth_download_all():
+    if DS is None: return _depth_unavailable()
+    sid=request.args.get('session_id'); _,d=get_session(sid)
+    res=d.get('depth')
+    if not res:return jsonify({'ok':False,'error':'Run the depth search first.'}),400
+    entries=[]
+    for entry in res['files']:
+        if entry['skipped']: continue
+        src=next((s for s in d['sub_files'] if s['label']==entry['file']),None)
+        if not src: continue
+        out,name=_depth_out_path(d,entry['file'])
+        DS.write_annotated_workbook(src['path'],out,entry['file'],d['tb'],res,entry)
+        entries.append((name,out))
+    if not entries:return jsonify({'ok':False,'error':'No searched files to download.'}),400
+    return bytes_response(DS.build_zip(entries),'Depth_Search_Outputs.zip','application/zip')

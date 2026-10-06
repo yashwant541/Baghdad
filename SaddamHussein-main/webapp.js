@@ -3,7 +3,7 @@
    through addEventListener + event delegation, and every network call goes
    through api() which never lets a non-JSON / error response fail silently. */
 
-let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',
+let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',fileTypes:{},depth:null,
   tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
   subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),subExtra:[],
   suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[],
@@ -108,7 +108,7 @@ async function uploadTB(){
   state.tbGroupItems=flattenTbGroups(state.tbTree); state.tbSelGroups=new Set();
   $('tbMessage').innerHTML=`<div class="notice good">Detected sheet <b>${esc(j.meta.sheet)}</b>, header row <b>${j.meta.header_row}</b>, ${j.meta.rows} data rows.</div>`;
   $('kpis').innerHTML=Object.entries(j.kpis).map(([k,v])=>`<div class="kpi"><small>${esc(k.replace('_',' '))}</small><b>${esc(fmt(v))}</b></div>`).join('');
-  renderPivot(); renderTbTree(); renderTbPicker(); setStatus('TB pivot ready'); go('pivot');
+  renderPivot(); renderTbTree(); renderTbPicker(); renderDepthFiles(); setStatus('TB pivot ready'); go('pivot');
 }
 function renderPivot(){
   const q=($('pivotSearch')?.value||'').toLowerCase();
@@ -147,6 +147,8 @@ async function uploadSubs(){
   state.subFilesMeta=j.files||[]; state.selection={};
   state.subFilesMeta.forEach(f=>{ state.selection[f.file]={};
     (f.sheets||[]).forEach(s=>{ state.selection[f.file][s.sheet]={checked: s.header_row!=null && s.score>=3, header_row: s.header_row}; }); });
+  state.fileTypes={}; state.subFilesMeta.forEach(f=>{ state.fileTypes[f.file]=f.guessed_type||'any'; });
+  state.depth=null; renderDepthFiles(); renderDepthResults();
   renderSheetPicker();
   $('extractActions').style.display='flex';
   $('subDownloadRow').style.display='none';
@@ -248,6 +250,77 @@ async function downloadFile(path,fallbackName){
 async function downloadSubmissions(){
   if(!state.session){toast('No active session yet');return}
   await downloadFile('/api/submissions/export?session_id='+encodeURIComponent(state.session),'Submissions_Simplified.xlsx');
+}
+
+/* ---------------- Depth Search: TB pivot values -> every non-zero cell, every sheet ---------------- */
+
+const DEPTH_TYPES=[['assets','Assets (033)'],['liabilities','Liabilities (034)'],
+  ['offbalance','Off-balance (064) — skipped for now'],['any','Other — search everything']];
+
+function renderDepthFiles(){
+  const box=$('depthFiles'); if(!box) return;
+  const ready=state.tbRaw.length>0 && state.subFilesMeta.length>0;
+  const pre=$('depthPrereq'); if(pre) pre.style.display=ready?'none':'block';
+  if(!state.subFilesMeta.length){ box.innerHTML='<div class="muted" style="padding:6px 2px">No submission files yet — upload them in the Submissions step.</div>'; return; }
+  box.innerHTML=state.subFilesMeta.map(f=>{
+    const cur=state.fileTypes[f.file]||'any';
+    return `<div class="depthFileRow"><b>${esc(f.file)}</b><span class="muted">${(f.sheets||[]).length} sheet(s)</span>
+      <select data-action="set-file-type" data-file="${esc(f.file)}">${DEPTH_TYPES.map(([v,l])=>`<option value="${v}" ${v===cur?'selected':''}>${esc(l)}</option>`).join('')}</select></div>`;
+  }).join('');
+}
+async function runDepth(){
+  if(!state.tbRaw.length){toast('Upload the Trial Balance first');return}
+  if(!state.subFilesMeta.length){toast('Upload the submission files first');return}
+  const num=(id,def)=>{const v=parseFloat($(id).value); return isNaN(v)?def:v};
+  setStatus('Searching every sheet for Trial Balance values');
+  const j=await api('/api/depth-search/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    session_id:state.session,file_types:state.fileTypes,
+    params:{min_value:num('depthMin',1000),min_scaled:num('depthMinScaled',100000),tol_abs:num('depthTol',1),
+            allow_scale:$('depthScale').checked,allow_sign:$('depthSign').checked,include_accounts:$('depthAccounts').checked}})});
+  state.depth=j; renderDepthResults();
+  const found=j.files.reduce((a,f)=>a+((f.stats||{}).targets_matched||0),0);
+  setStatus(`Depth search done — ${found} TB value(s) located`);
+}
+function depthHow(h){
+  const p=[];
+  if(h.scale!==1) p.push(scaleLabel(h.scale)+(h.scale_declared?' (sheet is in thousands)':''));
+  if(h.opposite_sign) p.push('opposite sign');
+  return p.join(', ')||'exact';
+}
+function renderDepthResults(){
+  const box=$('depthResults'); if(!box) return;
+  const j=state.depth, filt=$('depthFilter');
+  if(!j){ box.innerHTML=''; if(filt) filt.style.display='none'; $('btnDepthAll').style.display='none'; return; }
+  if(filt) filt.style.display='block';
+  const q=(filt?.value||'').toLowerCase();
+  $('btnDepthAll').style.display=j.files.some(f=>!f.skipped)?'inline-flex':'none';
+  box.innerHTML=j.files.map(f=>{
+    const st=f.stats||{};
+    const head=`<div class="depthCardHead"><div><b>${esc(f.file)}</b> <span class="chip">${esc(f.type_label)}</span></div>
+      ${f.skipped?'':`<button type="button" class="primary" data-action="download-depth" data-file="${esc(f.file)}">Download annotated workbook</button>`}</div>`;
+    if(f.skipped) return `<div class="depthCard">${head}<div class="muted">${esc((f.warnings||[]).join(' '))}</div></div>`;
+    const chips=[`${st.sheets_scanned} sheets scanned`,`${fmt(st.numeric_cells)} non-zero cells`,`${st.targets_matched} of ${st.targets_searched} TB values found`]
+      .concat(st.currency_conflicts?[`${st.currency_conflicts} currency conflict(s) not highlighted`]:[]).map(c=>`<span class="chip">${esc(c)}</span>`).join('');
+    const warn=(f.warnings||[]).map(w=>`<div class="notice" style="margin:8px 0 0">${esc(w)}</div>`).join('');
+    const hits=(f.hits||[]).filter(h=>{
+      if(!q) return true; const t=j.targets[h.target_id]||{};
+      return (t.label+' '+t.currency+' '+h.sheet+' '+h.cell+' '+h.row_label+' '+h.column_header).toLowerCase().includes(q); });
+    const shown=hits.slice(0,400);
+    const rows=shown.map(h=>{ const t=j.targets[h.target_id]||{};
+      return `<tr class="${h.currency_check==='CONFLICT'?'conflict':''}">
+        <td>${h.color?`<span class="swatch" style="background:#${esc(h.color)}"></span>`:''}</td>
+        <td><b>${esc(t.label)}</b> <span class="muted">${esc(ccyLabel(t.currency))}</span></td><td class="num">${esc(fmt(t.amount))}</td>
+        <td>${esc(h.sheet)}</td><td><b>${esc(h.cell)}</b></td>
+        <td class="num">${esc(h.value.toLocaleString(undefined,{maximumFractionDigits:6}))}</td><td>${esc(depthHow(h))}</td>
+        <td>${esc(h.row_label)}</td><td>${esc(h.column_header)}</td>
+        <td title="${h.currency_check==='CONFLICT'?'This column is a different currency from the TB value':''}">${esc(h.currency_check)}</td></tr>`; }).join('');
+    const table=hits.length?`<div class="depthScroll"><table class="depthTable"><thead><tr><th></th><th>TB item</th><th>TB amount</th><th>Sheet</th><th>Cell</th><th>Sheet value</th><th>How matched</th><th>Row label</th><th>Column</th><th>Currency</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      +(hits.length>shown.length?`<div class="muted" style="padding:6px 2px">Showing ${shown.length} of ${hits.length} — download the workbook for the full report.</div>`:'')
+      :'<div class="muted" style="padding:8px 2px">No matching cells'+(q?' for this filter':'')+'.</div>';
+    const un=(f.unmatched||[]).slice(0,500).map(u=>`<tr><td>${esc(u.level)}</td><td><b>${esc(u.label)}</b></td><td>${esc(ccyLabel(u.currency))}</td><td class="num">${esc(fmt(u.amount))}</td></tr>`).join('');
+    return `<div class="depthCard">${head}<div>${chips}</div>${warn}${table}
+      ${(f.unmatched||[]).length?`<details><summary>${f.unmatched.length} TB value(s) not found in this file</summary><div class="depthScroll"><table class="depthTable"><thead><tr><th>Level</th><th>TB item</th><th>Currency</th><th>TB amount</th></tr></thead><tbody>${un}</tbody></table></div></details>`:''}</div>`;
+  }).join('');
 }
 
 /* ---------------- Mapping Studio: auto-suggestions ---------------- */
@@ -813,6 +886,9 @@ const CLICK_ACTIONS={
   'upload-subs':(el)=>guarded(el,uploadSubs),
   'extract-subs':(el)=>guarded(el,extractSubs),
   'download-submissions':(el)=>guarded(el,downloadSubmissions),
+  'run-depth':(el)=>guarded(el,runDepth),
+  'download-depth':(el)=>guarded(el,()=>downloadFile('/api/depth-search/download?session_id='+encodeURIComponent(state.session)+'&file='+encodeURIComponent(el.dataset.file),'DepthSearch.xlsx')),
+  'download-depth-all':(el)=>guarded(el,()=>downloadFile('/api/depth-search/download-all?session_id='+encodeURIComponent(state.session),'Depth_Search_Outputs.zip')),
   'set-tb-level':(el)=>{ state.tbLevel=el.dataset.level; renderTbPicker(); },
   'set-acct-view':(el)=>{
     if(el.dataset.view===state.acctView) return;
@@ -876,6 +952,11 @@ document.addEventListener('change',e=>{
   if(el.dataset.action==='set-header-row'){
     state.selection[el.dataset.file][el.dataset.sheet].header_row=el.value?parseInt(el.value,10):null; return;
   }
+  if(el.dataset.action==='set-file-type'){
+    state.fileTypes[el.dataset.file]=el.value;
+    if(state.depth) toast('File type changed — run the depth search again to apply it.');
+    return;
+  }
   if(el.dataset.action==='toggle-suggestion'){
     state.suggestionDecisions[+el.dataset.index]=el.checked;
     el.closest('.suggestionCard')?.classList.toggle('accepted',el.checked);
@@ -897,6 +978,7 @@ document.addEventListener('input',e=>{
   if(e.target.id==='tbPickerSearch') renderTbPicker();
   if(e.target.id==='subPickerSearch') renderSubPicker();
   if(e.target.id==='coverageSearch') renderCoverageTable();
+  if(e.target.id==='depthFilter') renderDepthResults();
 });
 
 init();

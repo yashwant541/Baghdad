@@ -257,3 +257,28 @@ tr:hover td{background:var(--surface-2)}
   .matchBuilder,.mappingIO{grid-template-columns:1fr}
   .matchSides{grid-template-columns:1fr}
 }
+
+/* ---------- Depth Search ---------- */
+.depthHint{margin:0 0 10px;font-size:13px}
+.depthSettings{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);padding:16px 18px;box-shadow:var(--shadow-sm)}
+.depthSettings label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:700;color:var(--muted)}
+.depthSettings label.check{flex-direction:row;align-items:center;gap:8px;font-weight:600;color:var(--text,inherit)}
+.depthSettings input[type=number]{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px}
+.depthFileRow{display:flex;align-items:center;gap:14px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:8px}
+.depthFileRow b{flex:1;font-size:13.5px;word-break:break-all}
+.depthFileRow select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13px;background:var(--surface)}
+.depthCard{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);padding:18px;margin-bottom:16px;box-shadow:var(--shadow-sm)}
+.depthCardHead{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.depthCardHead b{font-size:15px}
+.depthTable{width:100%;min-width:1000px;border-collapse:collapse;font-size:12px}
+.depthTable td.num{white-space:nowrap}
+.depthTable td:nth-child(5),.depthTable td:nth-child(4){white-space:nowrap}
+.depthTable th{text-align:left;background:var(--surface-2);color:var(--ink);text-transform:none;letter-spacing:0;font-size:11.5px;padding:7px 8px;position:sticky;top:0;white-space:nowrap;border-bottom:1px solid var(--line)}
+.depthTable td{padding:6px 8px;border-top:1px solid var(--line);border-bottom:0;vertical-align:top;white-space:normal;max-width:260px;word-break:break-word}
+.depthTable tr.conflict td{color:var(--muted);font-style:italic}
+.depthScroll{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:8px}
+.swatch{display:inline-block;width:16px;height:16px;border-radius:4px;border:1px solid rgba(0,0,0,.18);vertical-align:middle}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.depthCard details{margin-top:10px}
+.depthCard summary{cursor:pointer;font-weight:700;font-size:13px}
+@media (max-width:900px){.depthSettings{grid-template-columns:1fr}}
