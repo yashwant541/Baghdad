@@ -512,6 +512,29 @@ class ReconEngine:
                     else:
                         matches=[r for r in pool if r['currency']==ccy]
                     if not matches: continue
+                    # The same section label usually recurs on several sheets (and in
+                    # several files) — often as different breakdowns of the SAME figure,
+                    # so adding them together double/triple counts. Judge each
+                    # (file, sheet) on its own and keep the one whose amount agrees with
+                    # the TB: exactly first, then via a scale and/or sign fit.
+                    hit_info={}
+                    sources=defaultdict(list)
+                    for r in matches: sources[(r['submission_file'],r['sheet'])].append(r)
+                    if len(sources)>1:
+                        tol_t=max(self.tolerance_abs,abs(tb_amt)*self.tolerance_pct)
+                        best_src=None
+                        for src,rows in sources.items():
+                            tt=[r for r in rows if r['is_total']]
+                            rs=sum(r['normalized_amount'] for r in (tt if tt else rows))
+                            face=min(abs(tb_amt-rs),abs(tb_amt+rs))
+                            if face<=tol_t: rank=0
+                            elif self.best_scale_fit(rs,tb_amt,self.tolerance_abs,self.tolerance_pct): rank=1
+                            else: rank=2
+                            key=(rank,face)
+                            if best_src is None or key<best_src[0]: best_src=(key,src)
+                        matches=sources[best_src[1]]
+                        hit_info={'multiple_hits':len(sources),'picked_by_amount':best_src[0][0]<2,
+                                  'picked_source':f"{best_src[1][0]} / {best_src[1][1]}"}
                     totals=[r for r in matches if r['is_total']]
                     chosen = totals if totals else matches
                     raw_sum=sum(r['normalized_amount'] for r in chosen)
@@ -524,7 +547,7 @@ class ReconEngine:
                         'currency':ccy,'tb_amount':tb_amt,'suggested_submission_amount':sub_amt,'difference':diff,
                         'sign_applied':resolved_sign,
                         'confidence':round(min(best_score, best_sub_score if best_sub_score else best_score),2),
-                        'match_basis':{'section_match':best_top,'subgroup_match':best_sub,'used_total_rows':bool(totals)},
+                        'match_basis':{'section_match':best_top,'subgroup_match':best_sub,'used_total_rows':bool(totals),**hit_info},
                         'rule_type':'AUTO_TOTAL' if ccy=='TOTAL' else 'AUTO_CURRENCY',
                         'components':[{'submission_file':r['submission_file'],'sheet':r['sheet'],'row_number':r['row_number'],
                                        'source_cell':r['source_cell'],'line_description':r['line_description'],'currency':r['currency'],
@@ -554,7 +577,7 @@ class ReconEngine:
                                 'sign_applied':sign_f,'scale_applied':scale_f,
                                 'confidence':round(min(best_score,best_sub_score if best_sub_score else best_score)*0.85,2),
                                 'match_basis':{'section_match':best_top,'subgroup_match':best_sub,'used_total_rows':bool(totals),
-                                                'scale_detected':scale_f},
+                                                'scale_detected':scale_f,**hit_info},
                                 'rule_type':'AUTO_SCALE_ADJUST',
                                 'components':[{'submission_file':r['submission_file'],'sheet':r['sheet'],'row_number':r['row_number'],
                                                'source_cell':r['source_cell'],'line_description':r['line_description'],'currency':r['currency'],
@@ -569,7 +592,7 @@ class ReconEngine:
                                 sub_amt2=sum(r['normalized_amount'] for r in chosen2)*scale_try*resolved_sign
                                 diff2=tb_amt-sub_amt2
                                 basis={'section_match':best_top,'subgroup_match':best_sub,'used_total_rows':False,
-                                       'auto_clubbed':True,'excluded_lines':len(matches)-len(chosen2)}
+                                       'auto_clubbed':True,'excluded_lines':len(matches)-len(chosen2),**hit_info}
                                 if scale_try!=1.0: basis['scale_detected']=scale_try
                                 suggestions.append({
                                     'bs_mapping':label,'group':gname,'subgroup':None if cname=='(Direct)' else cname,
@@ -742,6 +765,7 @@ class ReconEngine:
                                        'currency':tag_ccy or row.tran_ccy,'amount':float(row.adjusted_balance),'sign':item.get('sign',1)})
 
         sub_components=[]
+        pending=[]
         for item in template.get('submission_side',[]) or []:
             text=item.get('match_text') or item.get('line_description') or ''
             col_ctx=item.get('column_context') or ''
@@ -770,23 +794,71 @@ class ReconEngine:
             # Residents" vs "IQD Non-Residents"), the line description alone
             # can't tell them apart — blend in column-context similarity
             # whenever the template actually carries one.
-            best_idx,best_score=None,0.0
+            scored=[]
             for idx,row in pool.iterrows():
                 sc=text_similarity(text,row.line_description)
                 if col_ctx:
                     ctx_sc=text_similarity(col_ctx,row.get('column_context','') or '')
                     sc=0.5*sc+0.5*ctx_sc
-                if sc>best_score: best_idx,best_score=idx,sc
-            if best_idx is None or best_score<0.5:
+                scored.append((sc,idx))
+            scored.sort(key=lambda x:-x[0])   # stable: ties keep sheet order
+            best_score=scored[0][0] if scored else 0.0
+            if best_score<0.5:
                 warnings.append(f"Submission item low-confidence match, please review: {text!r} (best match score {best_score:.2f})")
                 continue
-            row=submissions.loc[best_idx]
+            # every line that carries (essentially) the same description is a
+            # "hit"; if there is more than one, the amount decides below.
+            cands=[(sc,idx) for sc,idx in scored if sc>=best_score-0.05][:12]
+            pending.append({'text':text,'sign':item.get('sign',1),'cands':cands})
+
+        # --- several lines share a description? pick by amount, not by position ---
+        # The submission side only knows a *description*, and the same label often
+        # recurs (other sections, other sheets). The TB side already has a real
+        # amount, so choose the hit (or combination of hits, when the mapping has
+        # several submission items) whose amount equals the TB amount — exactly
+        # at face value first, then allowing a thousands/millions scale and/or an
+        # opposite sign.
+        tb_target=sum(c['amount']*c.get('sign',1) for c in tb_components)
+        tol=max(self.tolerance_abs,abs(tb_target)*self.tolerance_pct)
+        picks=[p['cands'][0] for p in pending]
+        amb=[i for i,p in enumerate(pending) if len(p['cands'])>1]
+        by_amount=False
+        if amb and tb_components:
+            n_combos=1
+            for i in amb: n_combos*=len(pending[i]['cands'])
+            if n_combos<=20000:
+                fixed=sum(float(submissions.loc[p['cands'][0][1],'normalized_amount'])*p['sign']
+                          for i,p in enumerate(pending) if i not in amb)
+                best=None
+                for combo in itertools.product(*[pending[i]['cands'] for i in amb]):
+                    tot=fixed+sum(float(submissions.loc[idx,'normalized_amount'])*pending[i]['sign']
+                                  for i,(sc,idx) in zip(amb,combo))
+                    if abs(tb_target-tot)<=tol: rank,diff=0,abs(tb_target-tot)
+                    else:
+                        fit=self.best_scale_fit(tot,tb_target,self.tolerance_abs,self.tolerance_pct)
+                        if fit is None: continue
+                        rank,diff=1,fit[2]
+                    key=(rank,diff,-sum(sc for sc,_ in combo))
+                    if best is None or key<best[0]: best=(key,combo)
+                if best:
+                    by_amount=True
+                    for i,cnd in zip(amb,best[1]): picks[i]=cnd
+        for i in amb:
+            p=pending[i]; r=submissions.loc[picks[i][1]]
+            if by_amount:
+                warnings.append(f"{len(p['cands'])} submission lines match {p['text']!r}; picked {r.sheet}!{r.source_cell} "
+                                f"because its amount agrees with the Trial Balance amount.")
+            else:
+                warnings.append(f"{len(p['cands'])} submission lines match {p['text']!r} and none agrees with the Trial Balance "
+                                f"amount; took {r.sheet}!{r.source_cell} (best name match) — please review.")
+        for p,(sc,idx) in zip(pending,picks):
+            row=submissions.loc[idx]
             sub_components.append({'submission_file':row.submission_file,'sheet':row.sheet,'row_number':int(row.row_number),
                                     'source_cell':row.source_cell,'line_description':row.line_description,'currency':row.currency,
-                                    'amount':float(row.normalized_amount),'multiplier':1,'sign':item.get('sign',1),
-                                    'match_confidence':round(best_score,3)})
-            if best_score<0.85:
-                warnings.append(f"Submission item matched with moderate confidence ({best_score:.2f}): {text!r} → {row.line_description!r}")
+                                    'amount':float(row.normalized_amount),'multiplier':1,'sign':p['sign'],
+                                    'match_confidence':round(sc,3)})
+            if sc<0.85:
+                warnings.append(f"Submission item matched with moderate confidence ({sc:.2f}): {p['text']!r} → {row.line_description!r}")
 
         # the new period's submission file might not carry the same reporting
         # scale as when this mapping was first built (or the scale was never
