@@ -370,7 +370,11 @@ function renderDepthFiles(){
   if(ex){
     const o=state.outstanding;
     ex.style.display=o?'block':'none';
-    if(o) ex.innerHTML=`Outstanding Report loaded (${esc(o.sheet)}): its Pivot 1 (Bucket) is searched on Maturity sheets only, and Pivot 2 (CATEGORY: ${esc(o.selected_category||'All')}) on every sheet, in Off-balance files.`;
+    const hasOb=Object.values(state.fileTypes).some(t=>t==='offbalance');
+    ex.className='notice'+(hasOb?' good':'');
+    if(o) ex.innerHTML=hasOb
+      ? `Outstanding Report loaded (${esc(o.sheet)}): it is searched in the Off-balance (064) file only - its Pivot 1 (Bucket) on Maturity sheets, and Pivot 2 (CATEGORY: ${esc(o.selected_category||'All')}) on every sheet.`
+      : `Outstanding Report loaded (${esc(o.sheet)}), but no file is typed Off-balance (064) - set the type of the Off-balance submission below, otherwise its pivots are not searched.`;
   }
   if(!state.subFilesMeta.length){ box.innerHTML='<div class="muted" style="padding:6px 2px">No submission files yet — upload them in the Submissions step.</div>'; return; }
   box.innerHTML=state.subFilesMeta.map(f=>{
@@ -383,6 +387,7 @@ async function runDepth(){
   if(!state.tbRaw.length){toast('Upload the Trial Balance first');return}
   if(!state.subFilesMeta.length){toast('Upload the submission files first');return}
   const num=(id,def)=>{const v=parseFloat($(id).value); return isNaN(v)?def:v};
+  $('depthMessage').innerHTML='';
   setStatus('Searching every sheet for Trial Balance values');
   const j=await api('/api/depth-search/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
     session_id:state.session,file_types:state.fileTypes,
@@ -390,6 +395,7 @@ async function runDepth(){
             allow_scale:$('depthScale').checked,allow_sign:$('depthSign').checked,include_accounts:$('depthAccounts').checked,
             maturity_keywords:$('depthMat').value}})});
   state.depth=j; renderDepthResults();
+  $('depthMessage').innerHTML=(j.notes||[]).map(n=>`<div class="notice">${esc(n)}</div>`).join('');
   const found=j.files.reduce((a,f)=>a+((f.stats||{}).targets_matched||0),0);
   setStatus(`Depth search done — ${found} TB value(s) located`);
 }
@@ -412,6 +418,7 @@ function renderDepthResults(){
       ${f.skipped?'':`<button type="button" class="primary" data-action="download-depth" data-file="${esc(f.file)}">Download annotated workbook</button>`}</div>`;
     if(f.skipped) return `<div class="depthCard">${head}<div class="muted">${esc((f.warnings||[]).join(' '))}</div></div>`;
     const chips=[`${st.sheets_scanned} sheets scanned`,`${fmt(st.numeric_cells)} non-zero cells`,`${st.targets_matched} of ${st.targets_searched} TB values found`]
+      .concat(f.type==='offbalance'?[`Searched: ${st.from_tb_ob||0} OB- Trial Balance values + ${st.from_outstanding||0} Outstanding Report values`]:[])
       .concat(st.currency_conflicts?[`${st.currency_conflicts} currency conflict(s) not highlighted`]:[]).map(c=>`<span class="chip">${esc(c)}</span>`).join('');
     const warn=(f.warnings||[]).map(w=>`<div class="notice" style="margin:8px 0 0">${esc(w)}</div>`).join('');
     const hits=(f.hits||[]).filter(h=>{
@@ -1077,6 +1084,7 @@ document.addEventListener('change',e=>{
   if(el.dataset.action==='ob-category'){ guarded(null,()=>changeObCategory(el.value)); return; }
   if(el.dataset.action==='set-file-type'){
     state.fileTypes[el.dataset.file]=el.value;
+    renderDepthFiles();                       // refresh the Off-balance note above
     if(state.depth) toast('File type changed — run the depth search again to apply it.');
     return;
   }
@@ -1480,7 +1488,10 @@ const AR_DICT={
 "Amount search": "البحث بالمبلغ",
 "Sheets": "الأوراق",
 "Rows with invalid or blank Equ-IQD": "صفوف بمكافئ غير صالح أو فارغ",
-"Distinct values": "القيم المميزة"
+"Distinct values": "القيم المميزة",
+"Step 3 · Off-balance": "الخطوة 3 · خارج الميزانية",
+"Off-balance pivots (optional)": "جداول خارج الميزانية المحورية (اختياري)",
+"Optional: upload it after the Trial Balance and before the submissions. It is used only to reconcile the Off-balance (064) submission. The raw-data sheet and header row are found automatically, Equ-IQD is cleaned and validated, and two pivots are built. Depth Search then looks for their values in the Off-balance submission only, with the Bucket pivot searched on its Maturity sheet only.": "اختياري: ارفعه بعد ميزان المراجعة وقبل التقارير المقدّمة. يُستخدم فقط لتسوية تقرير خارج الميزانية (064). تُكتشف ورقة البيانات الخام وصف العناوين تلقائيًا، وتُنظَّف قيمة المكافئ بالدينار العراقي وتُراجع، ويُبنى جدولان محوريان. ثم يبحث البحث المتعمق عن قيمهما في تقرير خارج الميزانية فقط، ويُبحث في الجدول المحوري للفترات في ورقة الاستحقاق فقط."
 };
 const AR_RULES=[
 [
@@ -1700,22 +1711,6 @@ const AR_RULES=[
 "كل العملات غير {1}، يُعاد جمعها في كل مرة يُطبَّق فيها الربط"
 ],
 [
-"^Outstanding Report loaded \\((.+)\\): its Pivot 1 \\(Bucket\\) is searched on Maturity sheets only, and Pivot 2 \\(CATEGORY: (.+)\\) on every sheet, in Off-balance files\\.$",
-"تم تحميل تقرير الأرصدة القائمة ({1}): يُبحث عن الجدول المحوري 1 (الفترات) في أوراق الاستحقاق فقط، وعن الجدول المحوري 2 (الفئة: {2:t}) في كل ورقة، ضمن ملفات خارج الميزانية."
-],
-[
-"^(\\d+) row\\(s\\) have a blank or non-numeric Equ-IQD and are excluded from every total \\(see Validation\\)\\.$",
-"{1} صف/صفوف بمكافئ فارغ أو غير رقمي وهي مستبعدة من كل الإجماليات (انظر التحقق)."
-],
-[
-"^Pivot grand totals do not agree with the cleaned source total \\(difference (.+) / (.+)\\)\\.$",
-"الإجماليات العامة للجداول المحورية لا تتفق مع إجمالي المصدر المنظّف (الفرق {1} / {2})."
-],
-[
-"^(\\d+) sheets? / files? had this section$",
-"{1} أوراق/ملفات تحتوي هذا القسم"
-],
-[
 "^Download (.+) \\(translated\\)$",
 "تنزيل {1} (مترجم)"
 ],
@@ -1774,6 +1769,22 @@ const AR_RULES=[
 [
 "^Off-balance files are not searched yet\\.$",
 "ملفات خارج الميزانية لا تُبحث بعد."
+],
+[
+"^Outstanding Report loaded \\((.+)\\): it is searched in the Off-balance \\(064\\) file only - its Pivot 1 \\(Bucket\\) on Maturity sheets, and Pivot 2 \\(CATEGORY: (.+)\\) on every sheet\\.$",
+"تم تحميل تقرير الأرصدة القائمة ({1}): يُبحث عنه في ملف خارج الميزانية (064) فقط - الجدول المحوري 1 (الفترات) في أوراق الاستحقاق، والجدول المحوري 2 (الفئة: {2:t}) في كل ورقة."
+],
+[
+"^Outstanding Report loaded \\((.+)\\), but no file is typed Off-balance \\(064\\) - set the type of the Off-balance submission below, otherwise its pivots are not searched\\.$",
+"تم تحميل تقرير الأرصدة القائمة ({1})، لكن لا يوجد ملف مصنّف كخارج الميزانية (064) - حدّد نوع تقرير خارج الميزانية أدناه، وإلا فلن تُبحث جداوله المحورية."
+],
+[
+"^The Outstanding Report pivots were not searched: no file is typed Off-balance \\(064\\)\\. Set the type of the Off-balance submission under \\\"What is each file\\?\\\" and run again\\.$",
+"لم تُبحث الجداول المحورية لتقرير الأرصدة القائمة: لا يوجد ملف مصنّف كخارج الميزانية (064). حدّد نوع تقرير خارج الميزانية تحت «ما نوع كل ملف؟» ثم أعد التشغيل."
+],
+[
+"^Searched: (\\d+) OB- Trial Balance values \\+ (\\d+) Outstanding Report values$",
+"تم البحث عن: {1} قيمة OB- من ميزان المراجعة + {2} قيمة من تقرير الأرصدة القائمة"
 ]
 ].map(([src,tpl])=>[new RegExp(src),tpl]);
 const I18N_ATTRS=['placeholder','title','aria-label'];

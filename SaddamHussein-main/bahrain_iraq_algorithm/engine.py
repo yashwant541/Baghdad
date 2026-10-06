@@ -763,9 +763,13 @@ class ReconEngine:
             # Account number is only used as a tie-breaker when the
             # description alone doesn't land on a single confident match.
             cand=tb.iloc[0:0]
+            # an item that names a currency (EUR, AED, CNY...) takes ONLY that currency's lines; if this
+            # period's TB has none, the item is reported missing instead of quietly absorbing every
+            # other currency. 'TOTAL' and FRX are the only multi-currency items.
+            strict_ccy=bool(filter_ccy) and filter_ccy!="TOTAL" and not is_frx
             if desc:
                 pool=tb[tb.bs_mapping==bsmap] if bsmap and (tb.bs_mapping==bsmap).any() else tb
-                if filter_ccy and not is_frx and (pool.tran_ccy==filter_ccy).any():
+                if strict_ccy:
                     pool=pool[pool.tran_ccy==filter_ccy]
                 scored=sorted(((text_similarity(desc,row.account_desc),idx) for idx,row in pool.iterrows()),
                               key=lambda x:-x[0])
@@ -781,10 +785,11 @@ class ReconEngine:
                     cand=tb.loc[tied]
             if not len(cand) and acct:
                 hit=tb[tb.account.astype(str).str.strip()==acct]
-                if filter_ccy and not is_frx and (hit.tran_ccy==filter_ccy).any(): hit=hit[hit.tran_ccy==filter_ccy]
+                if strict_ccy: hit=hit[hit.tran_ccy==filter_ccy]
                 if len(hit): cand=hit
             if not len(cand):
-                warnings.append(f"TB item not found: account={acct or '—'!s} description={desc or '—'!s}")
+                warnings.append(f"TB item not found: account={acct or '—'!s} description={desc or '—'!s}"
+                                + (f" in {filter_ccy}" if strict_ccy else ""))
                 continue
             if is_frx:
                 # the account/description exists; keep only its foreign lines. Having none

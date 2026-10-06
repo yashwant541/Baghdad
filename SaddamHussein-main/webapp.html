@@ -5,8 +5,8 @@
     <div class="step active" data-page="welcome"><span class="stepIcon"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg></span><span class="stepLabel">Overview</span></div>
     <div class="step" data-page="trial"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6V2Z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg></span><span class="stepLabel">Trial Balance</span></div>
     <div class="step" data-page="pivot"><span class="stepIcon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 9v12"/></svg></span><span class="stepLabel">TB Pivot</span></div>
-    <div class="step" data-page="subs"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 14v6h16v-6"/><path d="M12 3v11M7 9l5-5 5 5"/></svg></span><span class="stepLabel">Submissions</span></div>
     <div class="step" data-page="offbal"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><rect x="3" y="4" width="18" height="16" rx="3"/></svg></span><span class="stepLabel">Off-Balance</span></div>
+    <div class="step" data-page="subs"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 14v6h16v-6"/><path d="M12 3v11M7 9l5-5 5 5"/></svg></span><span class="stepLabel">Submissions</span></div>
     <div class="step" data-page="depth"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 10.5h5M10.5 8v5"/></svg></span><span class="stepLabel">Depth Search</span></div>
     <div class="step" data-page="mapping"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle class="dotc" cx="6" cy="6" r="2.2"/><circle class="dotc" cx="6" cy="18" r="2.2"/><circle class="dotc" cx="18" cy="12" r="2.2"/><path d="M8 7l8 4M8 17l8-4"/></svg></span><span class="stepLabel">Mapping Studio</span></div>
     <div class="step" data-page="coverage"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M6 2h12v20H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></span><span class="stepLabel">Mapping Coverage</span></div>
@@ -34,10 +34,11 @@
   </div>
   <div class="flow"><b>Process</b>
     <div><span>1</span> Trial Balance <i>→</i> Pivot</div>
-    <div><span>2</span> Select submission sheets <i>→</i> Structural extraction</div>
-    <div><span>3</span> Auto-match groups, sub‑groups, currencies &amp; totals</div>
-    <div><span>4</span> Review / approve <i>→</i> Reconciliation</div>
-    <div><span>5</span> Full lineage map <i>→</i> Excel export</div>
+    <div><span>2</span> Outstanding Report <i>→</i> Off-balance pivots (optional)</div>
+    <div><span>3</span> Select submission sheets <i>→</i> Structural extraction</div>
+    <div><span>4</span> Auto-match groups, sub‑groups, currencies &amp; totals</div>
+    <div><span>5</span> Review / approve <i>→</i> Reconciliation</div>
+    <div><span>6</span> Full lineage map <i>→</i> Excel export</div>
   </div>
 </div>
 <div class="grid3">
@@ -86,7 +87,7 @@
 </section>
 
 <section id="offbal" class="page">
-<div class="title"><div><span class="kicker">Off-balance</span><h2>Outstanding Report</h2><p>Upload the Outstanding Report. The raw-data sheet and header row are found automatically, Equ-IQD is cleaned and validated, and two pivots are built. Depth Search then looks for their values in the Off-balance (064) submission, with the Bucket pivot searched on its Maturity sheet only.</p></div></div>
+<div class="title"><div><span class="kicker">Step 3 · Off-balance</span><h2>Outstanding Report</h2><p>Optional: upload it after the Trial Balance and before the submissions. It is used only to reconcile the Off-balance (064) submission. The raw-data sheet and header row are found automatically, Equ-IQD is cleaned and validated, and two pivots are built. Depth Search then looks for their values in the Off-balance submission only, with the Bucket pivot searched on its Maturity sheet only.</p></div></div>
 <div class="upload"><input id="obFile" type="file" accept=".xlsx,.xlsm,.xls,.xlsb"><div class="uploadIcon"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div><h3>Drop the Outstanding Report here</h3><p>Excel workbook with the raw outstanding-report data</p><button type="button" class="secondary" data-action="choose-ob">Choose file</button></div>
 <div class="actions"><button type="button" class="primary" id="btnUploadOb" data-action="upload-ob">Build pivots</button>
   <button type="button" class="secondary" id="btnOutstandingDl" data-action="download-outstanding" style="display:none">Download pivot workbook</button></div>

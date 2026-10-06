@@ -292,7 +292,7 @@ def depth_run():
     targets={t['id']:{'label':t['label'],'level':t['level'],'currency':t['currency'],'amount':t['amount'],'cell':t['cell'],
                       'sheet':t['sheet'],'family':t['family']} for t in res['targets']}
     ext=[{'sheet':e['sheet'],'scope':e['scope'],'category':e.get('category')} for e in res.get('externals',[])]
-    return jsonify({'ok':True,'files':files,'targets':targets,'params':res['params'],'externals':ext})
+    return jsonify({'ok':True,'files':files,'targets':targets,'params':res['params'],'externals':ext,'notes':res.get('notes',[])})
 
 @app.route('/api/depth-search/download',methods=['GET'])
 def depth_download():

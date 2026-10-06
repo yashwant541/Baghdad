@@ -393,7 +393,7 @@ def group_targets(targets):
     by_id = dict((t["id"], t) for t in targets)
     seen = {}
     for t in targets:
-        t["group"] = seen.setdefault((round(t["amount"], 2), t["family"], t.get("scope", "all")), t["id"])
+        t["group"] = seen.setdefault((round(t["amount"], 2), t["family"], t.get("scope", "all"), bool(t.get("external"))), t["id"])
         if t["group"] != t["id"]:
             prim = by_id[t["group"]]
             prim["names"].extend(n for n in t["names"] if n not in prim["names"])
@@ -430,7 +430,7 @@ def run_depth_search(tb, files, file_types, params=None, externals=None):
                             "cell": "%s%d" % (get_column_letter(et["col"]), et["row"]), "level": et["level"],
                             "label": et["label"], "currency": et["currency"], "amount": float(et["amount"]),
                             "family": "offbalance", "names": list(et["names"]), "currencies": [et["currency"]],
-                            "scope": spec["scope"]})
+                            "scope": spec["scope"], "external": True})
     group_targets(targets)
     kws = [ar_norm(k.strip()) for k in str(p["maturity_keywords"]).split(",") if k.strip()]
     mat_re = re.compile("|".join(re.escape(k) for k in kws), re.I) if kws else None
@@ -439,6 +439,13 @@ def run_depth_search(tb, files, file_types, params=None, externals=None):
     tol_abs = float(p["tol_abs"])
     route_labels = dict((fam, set(x["label"] for x in _route(files, types, fam)))
                         for fam in ("assets", "liabilities", "other", "offbalance"))
+    # the Outstanding Report exists only to reconcile the Off-balance submission: its pivots go to files
+    # the user typed Off-balance, never to "search everything" files
+    route_labels["outstanding"] = set(f["label"] for f in files if types.get(f["label"]) == "offbalance")
+    notes = []
+    if externals and not route_labels["outstanding"]:
+        notes.append("The Outstanding Report pivots were not searched: no file is typed Off-balance (064). "
+                     "Set the type of the Off-balance submission under \"What is each file?\" and run again.")
     out_files = []
     for f in files:
         label = f["label"]
@@ -454,7 +461,7 @@ def run_depth_search(tb, files, file_types, params=None, externals=None):
         entry["warnings"].extend(idx.warnings)
         mat_sheets = set(k for k, sh in enumerate(idx.sheets)
                          if mat_re and (mat_re.search(sh.name) or mat_re.search(ar_norm(sh.name))))
-        routed = [t for t in targets if t["group"] == t["id"] and label in route_labels[t["family"] or "other"]]
+        routed = [t for t in targets if t["group"] == t["id"] and label in route_labels["outstanding" if t.get("external") else (t["family"] or "other")]]
         skipped_maturity = [t for t in routed if t.get("scope") == "maturity" and not mat_sheets]
         if skipped_maturity:
             entry["warnings"].append(
@@ -533,10 +540,12 @@ def run_depth_search(tb, files, file_types, params=None, externals=None):
         entry["stats"] = {"sheets_scanned": len(idx.sheets), "numeric_cells": idx.n_cells,
                           "targets_searched": len(routed), "targets_matched": len(matched_targets),
                           "targets_unmatched": len(routed) - len(matched_targets),
-                          "hits": len(entry["hits"]), "currency_conflicts": n_conflict}
+                          "hits": len(entry["hits"]), "currency_conflicts": n_conflict,
+                          "from_tb_ob": sum(1 for t in routed if t.get("family") == "offbalance" and not t.get("external")),
+                          "from_outstanding": sum(1 for t in routed if t.get("external"))}
         out_files.append(entry)
     ext_store = [dict((k, v) for k, v in spec.items() if k != "targets") for spec in (externals or [])]
-    return {"params": p, "types": types, "targets": targets, "files": out_files, "externals": ext_store,
+    return {"params": p, "types": types, "targets": targets, "files": out_files, "externals": ext_store, "notes": notes,
             "pivot_columns": [_col_title(k) for k in layout["keys"]]}
 
 
