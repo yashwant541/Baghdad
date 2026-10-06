@@ -1,661 +1,4699 @@
-You are an expert Python, pandas, openpyxl, Excel, and Dataiku developer.
-
-Build a complete, production-ready Excel processing solution for the supplied workbook:
-
-"Outstanding Report - IRAQ-30 June.26 .xlsx"
-
-The solution must read the raw outstanding-report data, identify the correct source worksheet and header row dynamically, standardize the required columns, validate the data, and reproduce the business logic represented by the two supplied Excel PivotTable screenshots.
-
-Do not merely describe the approach. Produce complete, executable code.
-
-==================================================
-1. SOURCE WORKBOOK AND DATA STRUCTURE
-==================================================
-
-The workbook contains outstanding-report data with fields such as:
-
-- CATEGORY
-- CUST_SEGMENT
-- SECTION_ID
-- SEGMENT NAME (SEC ID)
-- CUSTOMER_ID
-- CUSTOMER NAME
-- CUSTOMER_REF_NO
-- DEAL_NUMBER
-- STEP_ID
-- PROCESS DATE
-- BILL_CCY
-- BILL_AMOUNT
-- DEAL_CCY
-- DEAL_BAL
-- SIGHT(Y/n)
-- AVAILISATION (Y/N)
-- FINANCED
-- FIN_TYPE
-- STATUS
-- FIN STATUS DESC
-- ACCEPTED MATURITY DATE
-- FIN_START_DATE
-- FIN_DUE_DATE
-- FINANCE_NUMBER
-- FIN_OUS_CCY
-- FIN_OUSTANDING AMT
-- MAR_CURRENCY
-- MARGIN BALANCE
-- EXP_DUE_DATE/MATURITY_DATE
-- Days o/s
-- CCIS_ID
-- DOC_PREP
-- CONFIRM_Y_N
-- CONFIRM_AMOUNT
-- DISCREPANT DOC
-- DOC_IN_ORDER
-- ISB
-- RMT
-- COL
-- ADV
-- RMB
-- APB
-- BENE/DRAWER
-- APPLICANT/DRAWEE
-- ACTUAL APPLICANT
-- LC/GTEE DESC
-- Rate or equivalent exchange-rate field
-- Equ-IQD
-- Bucket
-
-The workbook may contain multiple worksheets, including raw-data sheets, existing pivot sheets, support sheets, and exchange-rate sheets.
-
-Do not assume that:
-
-- The first worksheet is always the correct source.
-- The header is always on row 1.
-- Every workbook uses exactly the same worksheet name.
-- Column names have perfectly consistent spaces or capitalization.
-- Blank rows or blank columns are absent.
-- CATEGORY is populated on every row.
-- Excel PivotTable output sheets should be treated as raw transactional data.
-
-For example, the source workbook may contain:
-
-- A sheet where the header starts on row 2.
-- Another sheet where the header starts on row 1.
-- Existing pivot or summary sheets that must not be mistaken for source data.
-
-The program must examine candidate worksheets and select the best raw-data sheet based on the presence of mandatory fields.
-
-Mandatory source fields:
-
-- CATEGORY
-- BILL_CCY
-- LC/GTEE DESC
-- Equ-IQD
-- Bucket
-
-Prefer a worksheet containing the greatest number of recognized raw-data fields and valid detail rows.
-
-Exclude worksheets that appear to contain only pivot outputs, summaries, exchange rates, or report totals.
-
-==================================================
-2. DYNAMIC HEADER DETECTION
-==================================================
-
-Search the first 20 rows of every candidate worksheet.
-
-For each row:
-
-1. Read all nonblank cells.
-2. Normalize the cell text.
-3. Count how many recognized field names are present.
-4. Select the row with the highest valid header-field match.
-5. Accept the row as the header only when the mandatory columns can be resolved.
-
-Header normalization must:
-
-- Convert values to strings.
-- Trim leading and trailing spaces.
-- Replace repeated internal spaces with a single space.
-- Compare case-insensitively.
-- Preserve the original display label separately.
-- Handle trailing spaces, such as "Equ-IQD ".
-- Treat minor variations such as the following as equivalent:
-
-  "Equ-IQD"
-  "Equ-IQD "
-  "EQU-IQD"
-  "Equ IQD"
-
-  "LC/GTEE DESC"
-  "LC / GTEE DESC"
-  "LC-GTEE DESC"
-
-  "BILL_CCY"
-  "BILL CCY"
-
-  "CATEGORY"
-  "Category"
-
-  "Bucket"
-  "BUCKET"
-
-Do not identify columns by fixed Excel column letters.
-
-==================================================
-3. DATA CLEANING AND STANDARDIZATION
-==================================================
-
-Once the raw-data sheet and header row are identified:
-
-1. Read all rows below the detected header.
-2. Remove completely blank rows.
-3. Remove completely blank columns.
-4. Remove repeated header rows appearing inside the data.
-5. Standardize the required column names internally to:
-
-   CATEGORY
-   BILL_CCY
-   LC_GTEE_DESC
-   EQUI_IQD
-   BUCKET
-
-6. Trim spaces from all text grouping fields.
-7. Normalize blank strings, whitespace-only strings, "nan", "None", and similar values to null.
-8. Convert EQUI_IQD to numeric.
-9. Remove commas, currency symbols, and unnecessary spaces before numeric conversion.
-10. Preserve negative values.
-11. Do not silently convert invalid nonnumeric values to zero.
-12. Record rows with invalid EQUI_IQD values in a validation report.
-13. Do not arbitrarily forward-fill CATEGORY, BILL_CCY, LC/GTEE DESC, or Bucket unless explicit source-format evidence proves the workbook uses merged-cell continuation.
-14. Preserve missing grouping values and show them as "(blank)" in pivot-style output where appropriate.
-
-The sum used in all pivots must be based on the cleaned numeric EQUI_IQD field.
-
-Display the measure as:
-
-"Sum of Equ-IQD"
-
-==================================================
-4. PIVOT 1: CATEGORY, LC/GTEE DESCRIPTION, AND CURRENCY BY BUCKET
-==================================================
-
-Reproduce the logical configuration shown in the first screenshot.
-
-Pivot 1 field arrangement:
-
-Filters:
-- None
-
-Columns:
-- Bucket
-
-Rows, in this exact hierarchical order:
-1. CATEGORY
-2. LC/GTEE DESC
-3. BILL_CCY
-
-Values:
-- Sum of Equ-IQD
-
-Equivalent pandas logic:
-
-pivot_1 = pandas.pivot_table(
-    source_data,
-    index=["CATEGORY", "LC_GTEE_DESC", "BILL_CCY"],
-    columns=["BUCKET"],
-    values="EQUI_IQD",
-    aggfunc="sum",
-    fill_value=0,
-    margins=True,
-    margins_name="Grand Total",
-    dropna=False
-)
-
-Business meaning:
-
-- First group records by CATEGORY.
-- Within each CATEGORY, group records by LC/GTEE DESC.
-- Within each LC/GTEE DESC, split records by BILL_CCY.
-- Across columns, split the summed Equ-IQD amount by Bucket.
-- Include row totals and column totals.
-- The final result must allow a reviewer to understand which category, LC/guarantee description, and billing currency contribute to each maturity or aging bucket.
-
-Required Pivot 1 output structure:
-
-Rows:
-CATEGORY
-    LC/GTEE DESC
-        BILL_CCY
-
-Columns:
-Each distinct Bucket value
-Grand Total
-
-Values:
-Sum of Equ-IQD
-
-If the source contains blank Bucket values, include a "(blank)" bucket unless the configured blank-handling rule explicitly excludes it.
-
-The output must not apply any CATEGORY filter.
-
-Suggested output-sheet name:
-
-"Pivot_Category_Bucket"
-
-==================================================
-5. PIVOT 2: LC/GTEE DESCRIPTION BY BILLING CURRENCY
-==================================================
-
-Reproduce the logical configuration shown in the second screenshot.
-
-Pivot 2 field arrangement:
-
-Filters:
-- CATEGORY
-
-Columns:
-- BILL_CCY
-
-Rows:
-- LC/GTEE DESC
-
-Values:
-- Sum of Equ-IQD
-
-Equivalent pandas logic before applying an optional selected-category filter:
-
-filtered_data = source_data
-
-if a category has been selected:
-    filtered_data = source_data[
-        source_data["CATEGORY"] == selected_category
-    ]
-
-pivot_2 = pandas.pivot_table(
-    filtered_data,
-    index=["LC_GTEE_DESC"],
-    columns=["BILL_CCY"],
-    values="EQUI_IQD",
-    aggfunc="sum",
-    fill_value=0,
-    margins=True,
-    margins_name="Grand Total",
-    dropna=False
-)
-
-Business meaning:
-
-- CATEGORY behaves as a report-level filter.
-- LC/GTEE DESC appears as the row dimension.
-- BILL_CCY appears across columns.
-- Equ-IQD is summed for every LC/GTEE-description and billing-currency combination.
-- Include row totals and column totals.
-- When no category is selected, use all categories.
-- When a category is selected, filter the source rows before aggregation.
-
-The screenshot represents CATEGORY as a PivotTable filter, not as a row or column field.
-
-Required Pivot 2 output structure:
-
-Filter/control:
-CATEGORY
-
-Rows:
-LC/GTEE DESC
-
-Columns:
-Each distinct BILL_CCY value
-Grand Total
-
-Values:
-Sum of Equ-IQD
-
-Possible billing-currency columns may include values such as:
-
-- EUR
-- GBP
-- IQD
-- USD
-- JPY
-- (blank)
-
-Do not hardcode this list. Derive the available currencies from the source data.
-
-Suggested output-sheet name:
-
-"Pivot_LCGTEE_Currency"
-
-==================================================
-6. CATEGORY FILTER BEHAVIOR
-==================================================
-
-The solution must support two modes.
-
-Mode A: All categories
-
-- No source rows are excluded by CATEGORY.
-- Pivot 2 displays the aggregation for the complete dataset.
-
-Mode B: Selected category
-
-- Accept a category value as a configurable parameter.
-- Validate the selected value against the distinct CATEGORY values in the source data.
-- Filter the source data using an exact normalized match.
-- Generate Pivot 2 using only the selected category.
-- Display the selected category clearly above the report.
-
-If the supplied category does not exist:
-
-- Do not silently produce an empty pivot.
-- Raise a clear validation message.
-- Include the list of available category values.
-
-Pivot 1 must remain unfiltered unless a separate Pivot 1 filter parameter is explicitly configured.
-
-==================================================
-7. BUCKET LOGIC
-==================================================
-
-Use the existing Bucket field when the source data contains a populated Bucket column.
-
-Do not recreate, reinterpret, or overwrite existing Bucket classifications without an explicit business rule.
-
-Validate the Bucket field by reporting:
-
-- Distinct bucket labels.
-- Number of rows with a blank bucket.
-- Sum of Equ-IQD by bucket.
-- Whether leading or trailing spaces created duplicate-looking values.
-
-Normalize whitespace while preserving the business labels.
-
-For example, values such as:
-
-"0-30 Days"
-"0-30 Days "
-" 0-30 Days"
-
-should be treated as the same grouping value after trimming.
-
-If Bucket is missing entirely, stop Pivot 1 generation and issue a clear error identifying the missing field.
-
-==================================================
-8. EQUI-IQD VALUE LOGIC
-==================================================
-
-The PivotTable screenshots use:
-
-"Sum of Equ-IQD"
-
-Therefore, the main aggregation measure must be the source field Equ-IQD.
-
-If Equ-IQD already exists and contains valid values:
-
-- Use the existing values.
-- Do not overwrite them unnecessarily.
-
-If Equ-IQD is formula-driven:
-
-- Read the calculated values when available.
-- Also retain formula-awareness for diagnostics if the implementation supports it.
-- Do not treat formula text as a numeric amount.
-
-If the source data requires Equ-IQD to be calculated from an amount and exchange rate, implement the calculation only when the workbook or supplied mapping explicitly provides the rule.
-
-Do not invent a currency-conversion formula.
-
-Before creating the pivots, reconcile:
-
-sum of valid cleaned EQUI_IQD source rows
-
-against:
-
-the Pivot 1 Grand Total
-the Pivot 2 Grand Total when all categories are selected
-
-The totals must agree, subject only to documented exclusions such as invalid numeric rows.
-
-==================================================
-9. OUTPUT WORKBOOK
-==================================================
-
-Create a new output workbook rather than overwriting the source workbook.
-
-Suggested output filename:
-
-"Outstanding_Report_IRAQ_Pivot_Output.xlsx"
-
-Include these worksheets:
-
-1. "Source_Cleaned"
-   - Cleaned source records used in aggregation.
-   - Retain the relevant original columns.
-   - Clearly identify invalid or excluded records if any.
-
-2. "Pivot_Category_Bucket"
-   - Pivot 1 output.
-   - CATEGORY, LC/GTEE DESC, and BILL_CCY as nested rows.
-   - Bucket as columns.
-   - Sum of Equ-IQD as values.
-   - Grand totals included.
-
-3. "Pivot_LCGTEE_Currency"
-   - Pivot 2 output.
-   - CATEGORY selection shown above the table.
-   - LC/GTEE DESC as rows.
-   - BILL_CCY as columns.
-   - Sum of Equ-IQD as values.
-   - Grand totals included.
-
-4. "Validation"
-   - Source workbook name.
-   - Selected source sheet.
-   - Detected header row.
-   - Number of source rows read.
-   - Number of cleaned detail rows.
-   - Number of invalid EQUI_IQD rows.
-   - Number of blank CATEGORY rows.
-   - Number of blank LC/GTEE DESC rows.
-   - Number of blank BILL_CCY rows.
-   - Number of blank Bucket rows.
-   - Source EQUI_IQD total.
-   - Pivot 1 Grand Total.
-   - Pivot 2 Grand Total.
-   - Reconciliation difference.
-   - Distinct CATEGORY values.
-   - Distinct BILL_CCY values.
-   - Distinct Bucket values.
-   - Any missing mandatory fields or warnings.
-
-==================================================
-10. EXCEL PRESENTATION
-==================================================
-
-Format both pivot-like outputs professionally.
-
-Requirements:
-
-- Use a dark blue header fill with white bold text.
-- Freeze panes below the report header.
-- Apply filters where practical.
-- Use indentation or repeated labels to make row hierarchy understandable.
-- Apply numeric formatting to Equ-IQD values.
-- Show zero values as "-".
-- Show negative values in red and parentheses.
-- Bold subtotal and Grand Total rows.
-- Apply a strong upper border to Grand Total rows.
-- Auto-size columns with sensible maximum widths.
-- Keep original category, currency, description, and bucket labels readable.
-- Avoid unnecessary borders around every data cell.
-- Include a title describing each report.
-
-Pivot 1 title:
-
-"Equ-IQD by Category, LC/GTEE Description, Billing Currency and Bucket"
-
-Pivot 2 title:
-
-"Equ-IQD by LC/GTEE Description and Billing Currency"
-
-For Pivot 2, include:
-
-"Selected CATEGORY: All"
-
-or:
-
-"Selected CATEGORY: <selected category>"
-
-==================================================
-11. PANDAS MULTI-INDEX OUTPUT
-==================================================
-
-When exporting pandas pivot tables:
-
-- Reset or manage the MultiIndex carefully.
-- Ensure all row hierarchy labels appear in separate readable columns.
-- Do not leave index names as unnamed columns.
-- Do not create duplicate Grand Total rows.
-- Do not convert category labels into numeric values.
-- Preserve the intended row order:
-
-Pivot 1:
-CATEGORY → LC/GTEE DESC → BILL_CCY
-
-Pivot 2:
-LC/GTEE DESC
-
-Ensure the Grand Total column is positioned at the far right.
-
-If a "(blank)" column is generated, position the column immediately before Grand Total unless a source-defined ordering exists.
-
-==================================================
-12. SORTING
-==================================================
-
-Use stable and predictable sorting.
-
-Default sorting:
-
-- CATEGORY alphabetically.
-- LC/GTEE DESC alphabetically within CATEGORY.
-- BILL_CCY alphabetically within LC/GTEE DESC.
-- Currency columns alphabetically, with "(blank)" placed last before Grand Total.
-- Bucket columns should preserve a meaningful source or business order when available.
-
-Do not sort bucket labels lexicographically if doing so creates an illogical sequence.
-
-If bucket labels represent ordered periods, derive a sortable lower-bound value only for sorting purposes while preserving the original display label.
-
-==================================================
-13. VALIDATION AND EDGE CASES
-==================================================
-
-Handle the following conditions explicitly:
-
-- Header located below row 1.
-- Trailing spaces in column names.
-- Duplicate-looking columns after normalization.
-- Blank CATEGORY.
-- Blank LC/GTEE DESC.
-- Blank BILL_CCY.
-- Blank Bucket.
-- Blank or invalid Equ-IQD.
-- Negative Equ-IQD.
-- Duplicate transaction rows.
-- Multiple source-sheet candidates.
-- Existing pivot worksheets.
-- Formula cells without cached values.
-- Mixed text and numeric amount formats.
-- Currency codes with leading or trailing spaces.
-- Empty source dataset after cleaning.
-- A selected category with no matching records.
-
-Do not automatically remove duplicate transactional rows unless an exact business key is supplied.
-
-Instead, identify potential duplicate rows in the Validation sheet using available identifying fields such as:
-
-- CUSTOMER_ID
-- CUSTOMER_REF_NO
-- DEAL_NUMBER
-- STEP_ID
-- PROCESS DATE
-- BILL_CCY
-- BILL_AMOUNT
-- Equ-IQD
-
-==================================================
-14. DATAIKU COMPATIBILITY
-==================================================
-
-If implementing the solution as a Dataiku Python recipe:
-
-- Read the input workbook from a Dataiku managed folder.
-- Support selection of a specific Excel file.
-- Do not assume a local fixed path.
-- Discover workbook sheets dynamically.
-- Write the generated workbook to an output managed folder.
-- Use temporary local files only when required by the Excel-reading library.
-- Clean up temporary files.
-- Produce clear logging for:
-  - Input filename.
-  - Detected source sheet.
-  - Detected header row.
-  - Selected category.
-  - Record counts.
-  - Source total.
-  - Pivot totals.
-  - Validation errors.
-  - Output filename.
-
-Keep the processing logic modular.
-
-Suggested functions:
-
-- normalize_header()
-- normalize_group_value()
-- detect_header_row()
-- score_source_sheet()
-- select_source_sheet()
-- read_source_data()
-- standardize_columns()
-- clean_numeric_field()
-- validate_source_data()
-- build_category_bucket_pivot()
-- build_lcgtee_currency_pivot()
-- order_pivot_columns()
-- write_pivot_sheet()
-- write_validation_sheet()
-- create_output_workbook()
-- process_selected_workbook()
-
-==================================================
-15. REQUIRED DELIVERABLE
-==================================================
-
-Return one complete, executable Python implementation.
-
-The code must:
-
-1. Read the supplied Excel workbook.
-2. Detect the raw-data sheet and header dynamically.
-3. Standardize the required fields.
-4. Clean and validate Equ-IQD.
-5. Build Pivot 1 exactly as:
-
-   Filters: None
-   Columns: Bucket
-   Rows: CATEGORY → LC/GTEE DESC → BILL_CCY
-   Values: Sum of Equ-IQD
-
-6. Build Pivot 2 exactly as:
-
-   Filter: CATEGORY
-   Columns: BILL_CCY
-   Rows: LC/GTEE DESC
-   Values: Sum of Equ-IQD
-
-7. Include Grand Totals.
-8. Reconcile pivot totals to the cleaned source data.
-9. Generate the formatted output workbook.
-10. Provide clear errors rather than silently generating incorrect results.
-11. Avoid hardcoded worksheet names, header-row numbers, Excel column letters, currency values, category values, and bucket values.
-12. Preserve the existing business structure and do not invent missing calculation logic.
+{
+  "format": "bahrain-iraq-recon-mapping",
+  "version": 1,
+  "matches": [
+    {
+      "label": "A-CBI + A-CRR Matches with Balances with the Central Bank (First + Second) According to Schedule No 3",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "111701",
+          "account_desc": "Bal with C.Bk-Unrestricted",
+          "bs_mapping": "A-CBI",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "123001",
+          "account_desc": "Stat.Resrve Dep-NIB-Restricted",
+          "bs_mapping": "A-CRR",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Balances with the Central Bank (First + Second) According to Schedule No. 3",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-IGA Matches with Head Office and Branches IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "191815",
+          "account_desc": "VOSTRO Overdrawn - SCB Branche",
+          "bs_mapping": "A-IGA",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Head Office and Branches",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-TB Matches Net Investments In Papers / Securities Financial ( A+B — Pound ) Pursuant To / Under Schedule / Table ( 5 ) ( A , B ) IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "115120",
+          "account_desc": "Trsy&OthEligBilPu-FVOCI",
+          "bs_mapping": "A-TB",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "115122",
+          "account_desc": "Trsy&OthEligBilPu-MTM Gn-FVOCI",
+          "bs_mapping": "A-TB",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "208903",
+          "account_desc": "Bch FVOCI Res",
+          "bs_mapping": "A-TB",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Net Investments In Papers / Securities Financial ( A+B — Pound )  Pursuant To / Under Schedule / Table ( 5 )  ( A   , B  )",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-FA Matches Fixed Assets (A + B) IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "162001",
+          "account_desc": "Long L/H Ppty-Bk Premise(Cost)",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "162501",
+          "account_desc": "LL/H Ppty-Bk Pre(Acc.Dpr-Cost)",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164002",
+          "account_desc": "Work in Progress-H/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164008",
+          "account_desc": "WIP - Premises Project",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165001",
+          "account_desc": "Plant-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165001",
+          "account_desc": "Plant-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165001",
+          "account_desc": "Plant-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165001",
+          "account_desc": "Plant-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165203",
+          "account_desc": "Asset Clearing A/c- CLM",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165501",
+          "account_desc": "Plant-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165501",
+          "account_desc": "Plant-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165501",
+          "account_desc": "Plant-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165501",
+          "account_desc": "Plant-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166002",
+          "account_desc": "Office Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166002",
+          "account_desc": "Office Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166002",
+          "account_desc": "Office Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166004",
+          "account_desc": "Motor Vehicles-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166004",
+          "account_desc": "Motor Vehicles-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166502",
+          "account_desc": "Office Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166502",
+          "account_desc": "Office Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166502",
+          "account_desc": "Office Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166504",
+          "account_desc": "Motor Vehicles-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166504",
+          "account_desc": "Motor Vehicles-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Fixed Assets (A + B)",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-FA Minus the Capitalised Software Minus Depr Matches Held for Banking Purposes According to Schedule No. 16-A (List to be Prepared) IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "162001",
+          "account_desc": "Long L/H Ppty-Bk Premise(Cost)",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164002",
+          "account_desc": "Work in Progress-H/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "164003",
+          "account_desc": "Work in Progress-S/W Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165001",
+          "account_desc": "Plant-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165001",
+          "account_desc": "Plant-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165001",
+          "account_desc": "Plant-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165001",
+          "account_desc": "Plant-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165203",
+          "account_desc": "Asset Clearing A/c- CLM",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166001",
+          "account_desc": "Computer Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166002",
+          "account_desc": "Office Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166002",
+          "account_desc": "Office Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166002",
+          "account_desc": "Office Equipment-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166003",
+          "account_desc": "Furniture & Fittings-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166004",
+          "account_desc": "Motor Vehicles-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166004",
+          "account_desc": "Motor Vehicles-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Held for Banking Purposes According to Schedule No. 16-A (List to be Prepared)",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-FA Depr except Software Capitalisation Matches Less: Depreciation Provision IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "162501",
+          "account_desc": "LL/H Ppty-Bk Pre(Acc.Dpr-Cost)",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165501",
+          "account_desc": "Plant-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165501",
+          "account_desc": "Plant-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165501",
+          "account_desc": "Plant-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165501",
+          "account_desc": "Plant-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166501",
+          "account_desc": "Computer Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166502",
+          "account_desc": "Office Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166502",
+          "account_desc": "Office Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166502",
+          "account_desc": "Office Equipment-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166503",
+          "account_desc": "Furniture & Fittings-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166504",
+          "account_desc": "Motor Vehicles-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166504",
+          "account_desc": "Motor Vehicles-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288853",
+          "account_desc": "FA Clearing",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Less: Depreciation Provision",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "Capitalised Software with Depr Matches Intangible Assets IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166025",
+          "account_desc": "Capitalised Software-Cost",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "166525",
+          "account_desc": "Capitalised Software-Acc. Dpr",
+          "bs_mapping": "A-FA",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Intangible Assets",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-OA Matches Other Assets IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "165202",
+          "account_desc": "Leased Property Asset ROU -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165202",
+          "account_desc": "Leased Property Asset ROU -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165202",
+          "account_desc": "Leased Property Asset ROU -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165202",
+          "account_desc": "Leased Property Asset ROU -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165302",
+          "account_desc": "Leased Propty AssetAccDep -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165302",
+          "account_desc": "Leased Propty AssetAccDep -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165302",
+          "account_desc": "Leased Propty AssetAccDep -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165302",
+          "account_desc": "Leased Propty AssetAccDep -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "175177",
+          "account_desc": "AIR-Ln-C.Bk/Gov(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "175614",
+          "account_desc": "AIR-Ln-Bk(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "285402",
+          "account_desc": "MTM FX Liab- Group: Inter Brch",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "285402",
+          "account_desc": "MTM FX Liab- Group: Inter Brch",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288849",
+          "account_desc": "Payroll Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288870",
+          "account_desc": "Subsys Interface Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "289007",
+          "account_desc": "Branch FX Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291524",
+          "account_desc": "Group Amort Payable",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Other Assets (List to be Prepared)",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-CBI + A-CRR Matches Balances with the Central Bank (First + Second) According to Schedule No. 3 - Forex",
+      "currency": "FRX",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "111701",
+          "account_desc": "Bal with C.Bk-Unrestricted",
+          "bs_mapping": "A-CBI",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "123001",
+          "account_desc": "Stat.Resrve Dep-NIB-Restricted",
+          "bs_mapping": "A-CRR",
+          "currency": "FRX",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Balances with the Central Bank (First + Second) According to Schedule No. 3",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-IGA Matches Debit Balances with Banks Forex",
+      "currency": "FRX",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "191919",
+          "account_desc": "Ln-Br(O)",
+          "bs_mapping": "A-IGA",
+          "currency": "FRX",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Debit Balances with Banks",
+          "sheet": "Assets",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-OA Matches Other Assets (List to be Prepared) Forex",
+      "currency": "FRX",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "170288",
+          "account_desc": "GTO OPEX Recharges Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "191884",
+          "account_desc": "Revenue Transfer Pricing Rec",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "285402",
+          "account_desc": "MTM FX Liab- Group: Inter Brch",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "288831",
+          "account_desc": "Derivative Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "288870",
+          "account_desc": "Subsys Interface Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291872",
+          "account_desc": "COBRA Payable",
+          "bs_mapping": "A-OA",
+          "currency": "FRX",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Other Assets (List to be Prepared)",
+          "sheet": "Assets by Foreign Currency",
+          "currency": "TOTAL",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "Ln-Br(O) Matching Matches Term Deposits USD",
+      "currency": "USD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "191919",
+          "account_desc": "Ln-Br(O)",
+          "bs_mapping": "A-IGA",
+          "currency": "USD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Term Deposits",
+          "sheet": "Schedule No. 4-A",
+          "currency": "TOTAL",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-CBI + A-CRR Matches Balances with the Central Bank (First + Second) According to Schedule No. 3 -- Total",
+      "currency": "TOTAL",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "111701",
+          "account_desc": "Bal with C.Bk-Unrestricted",
+          "bs_mapping": "A-CBI",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "111701",
+          "account_desc": "Bal with C.Bk-Unrestricted",
+          "bs_mapping": "A-CBI",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "123001",
+          "account_desc": "Stat.Resrve Dep-NIB-Restricted",
+          "bs_mapping": "A-CRR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "123001",
+          "account_desc": "Stat.Resrve Dep-NIB-Restricted",
+          "bs_mapping": "A-CRR",
+          "currency": "USD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Balances with the Central Bank (First + Second) According to Schedule No. 3",
+          "sheet": "Assets",
+          "currency": "TOTAL",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-IGA Totals EXCEPT IQD and USD PLUS Nostro -SCB Branches in USD -> Matches with -> Current Schedule no 4A Total",
+      "currency": "TOTAL",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "AED",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "AED",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "CNY",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "CNY",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "EUR",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "EUR",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "EUR",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "GBP",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "GBP",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "JPY",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Current",
+          "sheet": "Schedule No. 4-A",
+          "currency": "TOTAL",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-OA Totals Match Other Assets (List to be Prepared)",
+      "currency": "TOTAL",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "165202",
+          "account_desc": "Leased Property Asset ROU -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165202",
+          "account_desc": "Leased Property Asset ROU -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165202",
+          "account_desc": "Leased Property Asset ROU -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165202",
+          "account_desc": "Leased Property Asset ROU -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165302",
+          "account_desc": "Leased Propty AssetAccDep -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165302",
+          "account_desc": "Leased Propty AssetAccDep -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165302",
+          "account_desc": "Leased Propty AssetAccDep -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "165302",
+          "account_desc": "Leased Propty AssetAccDep -CLM",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170288",
+          "account_desc": "GTO OPEX Recharges Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "170288",
+          "account_desc": "GTO OPEX Recharges Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "175177",
+          "account_desc": "AIR-Ln-C.Bk/Gov(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "175614",
+          "account_desc": "AIR-Ln-Bk(O)",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "AED",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "AED",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "AED",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191884",
+          "account_desc": "Revenue Transfer Pricing Rec",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "285402",
+          "account_desc": "MTM FX Liab- Group: Inter Brch",
+          "bs_mapping": "A-OA",
+          "currency": "AED",
+          "sign": 1
+        },
+        {
+          "account": "285402",
+          "account_desc": "MTM FX Liab- Group: Inter Brch",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "285402",
+          "account_desc": "MTM FX Liab- Group: Inter Brch",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "285402",
+          "account_desc": "MTM FX Liab- Group: Inter Brch",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "288831",
+          "account_desc": "Derivative Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "288849",
+          "account_desc": "Payroll Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288870",
+          "account_desc": "Subsys Interface Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "CNH",
+          "sign": 1
+        },
+        {
+          "account": "288870",
+          "account_desc": "Subsys Interface Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "289007",
+          "account_desc": "Branch FX Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291524",
+          "account_desc": "Group Amort Payable",
+          "bs_mapping": "A-OA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291872",
+          "account_desc": "COBRA Payable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "291872",
+          "account_desc": "COBRA Payable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Other Assets (List to be Prepared)",
+          "sheet": "Assets by Maturity",
+          "currency": "TOTAL",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-CBI + A-CRR Matches Balances with the Central Bank (First + Second) According to Schedule No. 3 USD",
+      "currency": "USD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "111701",
+          "account_desc": "Bal with C.Bk-Unrestricted",
+          "bs_mapping": "A-CBI",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "123001",
+          "account_desc": "Stat.Resrve Dep-NIB-Restricted",
+          "bs_mapping": "A-CRR",
+          "currency": "USD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Balances with the Central Bank (First + Second) According to Schedule No. 3",
+          "sheet": "Assets by Foreign Currency",
+          "currency": "USD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-IGA Matches Debit Balances with Banks USD",
+      "currency": "USD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191919",
+          "account_desc": "Ln-Br(O)",
+          "bs_mapping": "A-IGA",
+          "currency": "USD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Debit Balances with Banks",
+          "sheet": "Assets by Foreign Currency",
+          "currency": "USD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-IGA Matches Debit Balances with Banks EUR",
+      "currency": "EUR",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "EUR",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "EUR",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "EUR",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Debit Balances with Banks",
+          "sheet": "Assets by Foreign Currency",
+          "currency": "EUR",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-IGA Matches Debit Balances with Banks GBP",
+      "currency": "GBP",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "GBP",
+          "sign": 1
+        },
+        {
+          "account": "191701",
+          "account_desc": "NOSTRO - SCB Branches",
+          "bs_mapping": "A-IGA",
+          "currency": "GBP",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Debit Balances with Banks",
+          "sheet": "Assets by Foreign Currency",
+          "currency": "GBP",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "A-OA Matches Other Assets (List to be Prepared) USD",
+      "currency": "USD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "170288",
+          "account_desc": "GTO OPEX Recharges Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "170288",
+          "account_desc": "GTO OPEX Recharges Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "170803",
+          "account_desc": "Prepayment of Expenditure",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "171519",
+          "account_desc": "AIR-Ln-Br(O)",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "185402",
+          "account_desc": "MTM FX Asset- Group: Int Brch",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "185502",
+          "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191884",
+          "account_desc": "Revenue Transfer Pricing Rec",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "191890",
+          "account_desc": "Group TP Revenue Receivable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "285402",
+          "account_desc": "MTM FX Liab- Group: Inter Brch",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "288831",
+          "account_desc": "Derivative Suspense",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "291872",
+          "account_desc": "COBRA Payable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        },
+        {
+          "account": "291872",
+          "account_desc": "COBRA Payable",
+          "bs_mapping": "A-OA",
+          "currency": "USD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Other Assets (List to be Prepared)",
+          "sheet": "Assets by Foreign Currency",
+          "currency": "USD",
+          "is_total": false,
+          "sign": 1
+        }
+      ]
+    },
+    {
+      "label": "L-CASA Matches Deposits Entities Other (First + Second) Tables Number 18 And 19",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "231001",
+          "account_desc": "Curr A/c  Credit Bal.-Cust",
+          "bs_mapping": "L-CASA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "231001",
+          "account_desc": "Curr A/c  Credit Bal.-Cust",
+          "bs_mapping": "L-CASA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "231001",
+          "account_desc": "Curr A/c  Credit Bal.-Cust",
+          "bs_mapping": "L-CASA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "231001",
+          "account_desc": "Curr A/c  Credit Bal.-Cust",
+          "bs_mapping": "L-CASA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "231001",
+          "account_desc": "Curr A/c  Credit Bal.-Cust",
+          "bs_mapping": "L-CASA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "231001",
+          "account_desc": "Curr A/c  Credit Bal.-Cust",
+          "bs_mapping": "L-CASA",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "231001",
+          "account_desc": "Curr A/c  Credit Bal.-Cust",
+          "bs_mapping": "L-CASA",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Deposits Entities Other ( First + Second ) Tables Number 18 And19",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L-IGL-C + L-IGL-F Matches Deposits Banks (First + Second) Schedule / Table Number 17",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "291701",
+          "account_desc": "VOSTRO - SCB Branches",
+          "bs_mapping": "L-IGL-C",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291807",
+          "account_desc": "NOSTRO Overdrawn-SCB Branches",
+          "bs_mapping": "L-IGL-C",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291774",
+          "account_desc": "Dep-Br(O)",
+          "bs_mapping": "L-IGL-F",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Deposits Banks (First + Second) Schedule / Table Number 17",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L-OL Matches Liabilities Other ( Considered Statement Accordingly )",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "157721",
+          "account_desc": "Lease Liability Holding- CLM",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "170253",
+          "account_desc": "Sundry Debtors-eBBS",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "185410",
+          "account_desc": "OCA / DVA adj in Derivatives",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "254305",
+          "account_desc": "Lease Liability -Property CLM",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "261574",
+          "account_desc": "AIP-Dep-Br(O)",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "267501",
+          "account_desc": "AIP-Current A/c",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "268107",
+          "account_desc": "Prov-Audit Fee & Expenses",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "268109",
+          "account_desc": "Accrued Expenses not Paid",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "268110",
+          "account_desc": "Trade Creditor Control",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "268257",
+          "account_desc": "Accruals-Others",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "272001",
+          "account_desc": "Prov-Pen.F Con-Def.Ben(Lo Sch)",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "285410",
+          "account_desc": "OCA / DVA adj Deriv_Liab",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "285522",
+          "account_desc": "MTM-Lia-Deriv-Non-Bk",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "287501",
+          "account_desc": "Unclaimed Bal-Misc",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "287601",
+          "account_desc": "Withholding Tax",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "287659",
+          "account_desc": "TDS Staff Salary",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288801",
+          "account_desc": "PSGL Edit Suspense",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288810",
+          "account_desc": "OPICS-Suspense Ac",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288830",
+          "account_desc": "Forex Suspense",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288841",
+          "account_desc": "Online Suspense",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288842",
+          "account_desc": "Straight Thru Svcs Susp",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288901",
+          "account_desc": "FXMM MX3-eBBS bridge",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288905",
+          "account_desc": "GPTM Bridge Account",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "288913",
+          "account_desc": "FA Clearing-OT change",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "289221",
+          "account_desc": "IMEX Br Fx Recon Suspense",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291522",
+          "account_desc": "Group Insurance Payable",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291805",
+          "account_desc": "CBR Payable - Branches",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291836",
+          "account_desc": "HR intercompany Payable",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291841",
+          "account_desc": "WIP Impair Charges Payable",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291870",
+          "account_desc": "Revenue Transfer Pricing Pay",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291871",
+          "account_desc": "Grp Business Cost Payable",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291875",
+          "account_desc": "Group TP Revenue Payable",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "291876",
+          "account_desc": "Group TP Cost Payable",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "292809",
+          "account_desc": "GBS recharges due to SCB",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "292810",
+          "account_desc": "Due to/from IT365 Malaysia",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "292813",
+          "account_desc": "CAPEX Recharges Payable",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "292851",
+          "account_desc": "TPS Recharges Payable",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "299130",
+          "account_desc": "MTM FX Grp: Interdesk",
+          "bs_mapping": "L-OL",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Liabilities Other ( Considered Statement Accordingly )",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L-PR Matches Allocations/Provisions Various (Consolidated Statement Accordingly) IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "138212",
+          "account_desc": "ECL Pro-LN to Cu-AMC",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "203208",
+          "account_desc": "ECLAccImp-TryBil-FVOCI Br",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "222221",
+          "account_desc": "Other provision CY",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "222222",
+          "account_desc": "Other provision PY",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "268103",
+          "account_desc": "Prov-Performance Bonus",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "268120",
+          "account_desc": "Prov-Holiday Pay",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "270221",
+          "account_desc": "ECL Prov-AMC-Dir Cr Sub",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "270222",
+          "account_desc": "ECL Prov-AMC-Tran Cont",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "270230",
+          "account_desc": "ECL Prov-AMC-Commitments",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "272058",
+          "account_desc": "Prov. For Gratuity Payment",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "283501",
+          "account_desc": "Prov for I. Tax - This Period",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "283502",
+          "account_desc": "Prov for I. Tax - Prior Period",
+          "bs_mapping": "L-PR",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Allocations / Provisions Various ( Considered Statement Accordingly )",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L-PL Matches Profits and Losses During Period IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "315101",
+          "account_desc": "Int Rec Try Bill_AFS",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "333701",
+          "account_desc": "Int/Pft Rec Overdraft",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "333732",
+          "account_desc": "Int/Prof Rec Corp.Term Lns/Fin",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "391519",
+          "account_desc": "Int Inc-Br(O)",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "399992",
+          "account_desc": "GLEL - Reclass-Interest inc",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "441020",
+          "account_desc": "IntPd Liab DbtSc-C.Bk&Gov-Shrt",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "489058",
+          "account_desc": "Lease Finance Cost-Property",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "491574",
+          "account_desc": "Int Exp-Br(O)",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "504549",
+          "account_desc": "Other Misc. Fee",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "515003",
+          "account_desc": "Comm Outward Remittances",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "515008",
+          "account_desc": "Comm Payroll Services",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "515016",
+          "account_desc": "Transaction Fee",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "515114",
+          "account_desc": "Straight to Bank (S2B)",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "555003",
+          "account_desc": "Exchange Reval.Gain / Loss",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "555019",
+          "account_desc": "Fx gain / loss (Others)",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "555064",
+          "account_desc": "Real'd P/L-FX Trading",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "555065",
+          "account_desc": "Unreal'd P/L-FX Trading",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "555078",
+          "account_desc": "FX Carry Forward - FCYPL(OPI)",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "555080",
+          "account_desc": "FX Carry Forward - FCYPL(MX3)",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "559002",
+          "account_desc": "Unreal'd P/L-Deriv (Manual)",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "559165",
+          "account_desc": "Unreal'd P/L-Deriv (Trdg)-Adj",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "599948",
+          "account_desc": "GLEL -Recls-Dealing/Exch-Exch",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "611101",
+          "account_desc": "Salary-Employees Local",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "611401",
+          "account_desc": "Housing Allowance",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "611702",
+          "account_desc": "Perf.Bonus-CurrentYr NonBanded",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "611704",
+          "account_desc": "Perf. Bonus-Prior Yr NonBanded",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "611733",
+          "account_desc": "Deferred Cash Awards",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "612501",
+          "account_desc": "Pension Fund Admin Charges",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "612558",
+          "account_desc": "Gratuity Payment",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "613001",
+          "account_desc": "Training-Internal",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "615101",
+          "account_desc": "Medical Expenses",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "615107",
+          "account_desc": "Leave Travel",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "615112",
+          "account_desc": "Staff Welfare Expenses",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "615123",
+          "account_desc": "Holiday Pay Provision",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "615185",
+          "account_desc": "Recruitment: Agency Services",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "632100",
+          "account_desc": "Property Ops-Cost Recharge Adj",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "632104",
+          "account_desc": "Utilities",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "632105",
+          "account_desc": "Premises Security Services",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "632106",
+          "account_desc": "Property Ops - Costs Recharge",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "632149",
+          "account_desc": "Cleaning, Pest Control & Waste",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "633003",
+          "account_desc": "Depn-Prem Long Leasehold-Comm",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "633007",
+          "account_desc": "Depn-Leased Property Assets",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "634001",
+          "account_desc": "Depn-Computer Equipment",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "634002",
+          "account_desc": "Depn-Office Equipment",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "634003",
+          "account_desc": "Depn-Furniture & Fixtures",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "652151",
+          "account_desc": "Consultancy- Outsourced Agency",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "652519",
+          "account_desc": "Professional Fee-Other",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "652520",
+          "account_desc": "Legal Fee-Other",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "654503",
+          "account_desc": "Data Comm - Domestic",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "654504",
+          "account_desc": "Courier & Air Freight",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "654521",
+          "account_desc": "Telephone-Cellular",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "655002",
+          "account_desc": "Computer Software Maintenance",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "655003",
+          "account_desc": "Hardware Costs",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "655801",
+          "account_desc": "Depn-Capitalised Software",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "656001",
+          "account_desc": "Travel-Air fare",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "656003",
+          "account_desc": "Hotel Accommodation",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "656005",
+          "account_desc": "Travel-Meals",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "656051",
+          "account_desc": "Travel-Private Cars",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "657219",
+          "account_desc": "Stationery-Others",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "657252",
+          "account_desc": "Office Supply",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "661002",
+          "account_desc": "Corp. Clubs-Subscription",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "661007",
+          "account_desc": "Sub-Reuters MIS",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665003",
+          "account_desc": "Fines & Penalties",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665011",
+          "account_desc": "Regulatory Fees",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665029",
+          "account_desc": "TP In to Spoke from SC GBS MY",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665030",
+          "account_desc": "TP In to Spoke from SC GBS IN",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665045",
+          "account_desc": "Security Delivery Services",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665047",
+          "account_desc": "Outsource/Vendor/Channel Cost",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665049",
+          "account_desc": "Misc Expenses",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665091",
+          "account_desc": "TP In to Spoke from SC GBS Pol",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665286",
+          "account_desc": "Prj Amort - Cap Software - IC",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "665287",
+          "account_desc": "Prj Amort - Cap Software - TC",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "711204",
+          "account_desc": "B/D -TrsyBil-FVOCI",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "711212",
+          "account_desc": "B/D -LN To Cu-AMC",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "711222",
+          "account_desc": "B/D Prov-AMC-Tran Cont",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "772001",
+          "account_desc": "Local Tax-Current Year",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "772002",
+          "account_desc": "Local Tax Prior Year",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "777771",
+          "account_desc": "Other provision CY expense",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "799001",
+          "account_desc": "FCY P/L-Offset",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        },
+        {
+          "account": "799002",
+          "account_desc": "FCY P/L-Offset - Revaluation",
+          "bs_mapping": "L-PL",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Profits And Losses During Period",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "208301 Matching Profits and Losses Carried Forward From Years Previous IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "208301",
+          "account_desc": "P/L Awaiting Remittance",
+          "bs_mapping": "L-PYR",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Profits And Losses Carried Forward From Years Previous",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "Statutory Reserve Matching Reserve Mandatory IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "208701",
+          "account_desc": "Statutory Reserve - Br. Ops",
+          "bs_mapping": "L-PYR",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Reserve Mandatory",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L-Capital Matching Head/Capital Capital Subscriber Thereof IQD",
+      "currency": "IQD",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "206001",
+          "account_desc": "H.O assigned Cap-N-Int Bearing",
+          "bs_mapping": "L-CAPITAL",
+          "currency": "IQD",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Head / Capital Capital Subscriber Thereof",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L- CASA Forex Matching Deposits Entities Other (First + Second) Tables Number 18 And19 Forex",
+      "currency": "FRX",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "231001",
+          "account_desc": "Curr A/c  Credit Bal.-Cust",
+          "bs_mapping": "L-CASA",
+          "currency": "FRX",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Deposits Entities Other ( First + Second ) Tables Number 18 And19",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L-OL Forex Matching Liabilities Other (Considered Statement Accordingly) Forex",
+      "currency": "FRX",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "170204",
+          "account_desc": "Sundry Receivable-Fee & Comm",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "185410",
+          "account_desc": "OCA / DVA adj in Derivatives",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "254305",
+          "account_desc": "Lease Liability -Property CLM",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "268109",
+          "account_desc": "Accrued Expenses not Paid",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "268502",
+          "account_desc": "Fee / Comm recd in adv - Gen",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "285410",
+          "account_desc": "OCA / DVA adj Deriv_Liab",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "287013",
+          "account_desc": "Stamp Duty Payable",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "288832",
+          "account_desc": "Imex Transfer Suspense",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "288842",
+          "account_desc": "Straight Thru Svcs Susp",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "288901",
+          "account_desc": "FXMM MX3-eBBS bridge",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "289007",
+          "account_desc": "Branch FX Suspense",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "289956",
+          "account_desc": "IMEX Online Suspense Account",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291521",
+          "account_desc": "GTO OPEX Rech Payable FC",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291522",
+          "account_desc": "Group Insurance Payable",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291801",
+          "account_desc": "Due to SCB Branches",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291805",
+          "account_desc": "CBR Payable - Branches",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291808",
+          "account_desc": "Share Options Interco Liab",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291836",
+          "account_desc": "HR intercompany Payable",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291870",
+          "account_desc": "Revenue Transfer Pricing Pay",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291875",
+          "account_desc": "Group TP Revenue Payable",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "291876",
+          "account_desc": "Group TP Cost Payable",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "292809",
+          "account_desc": "GBS recharges due to SCB",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "292810",
+          "account_desc": "Due to/from IT365 Malaysia",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "292813",
+          "account_desc": "CAPEX Recharges Payable",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "292851",
+          "account_desc": "TPS Recharges Payable",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "292857",
+          "account_desc": "MDs Recharges Payable",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "299130",
+          "account_desc": "MTM FX Grp: Interdesk",
+          "bs_mapping": "L-OL",
+          "currency": "FRX",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Liabilities Other ( Considered Statement Accordingly )",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L-PR Matches Allocations / Provisions Various ( Considered Statement Accordingly ) Forex",
+      "currency": "FRX",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "268277",
+          "account_desc": "Prov-Deferred Cash Awards",
+          "bs_mapping": "L-PR",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "270221",
+          "account_desc": "ECL Prov-AMC-Dir Cr Sub",
+          "bs_mapping": "L-PR",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "270222",
+          "account_desc": "ECL Prov-AMC-Tran Cont",
+          "bs_mapping": "L-PR",
+          "currency": "FRX",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Allocations / Provisions Various ( Considered Statement Accordingly )",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L-PL Forex Matches Profits And Losses During Period",
+      "currency": "FRX",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "322001",
+          "account_desc": "Int Rec Nostro Account",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "391519",
+          "account_desc": "Int Inc-Br(O)",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "503052",
+          "account_desc": "Fees - Structured Deals",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "504549",
+          "account_desc": "Other Misc. Fee",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "510001",
+          "account_desc": "Trade Finance Comm.",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "510002",
+          "account_desc": "Amortisation-Guarantee Fees",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "515003",
+          "account_desc": "Comm Outward Remittances",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "515008",
+          "account_desc": "Comm Payroll Services",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "515011",
+          "account_desc": "Deposit Fee",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "515016",
+          "account_desc": "Transaction Fee",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "515114",
+          "account_desc": "Straight to Bank (S2B)",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "535001",
+          "account_desc": "Recovery of Communication Cost",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "547227",
+          "account_desc": "TP Out CAL Revenue Prior Yr",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "547228",
+          "account_desc": "Group TP OUT Revenue CY",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "547702",
+          "account_desc": "Nostro Account Exps",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "547748",
+          "account_desc": "Write Off account (NFI)",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "550007",
+          "account_desc": "GLEL-Trfer Pricing Trding Inc",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "550010",
+          "account_desc": "Interco Trading Income Sweep",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "555003",
+          "account_desc": "Exchange Reval.Gain / Loss",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "555019",
+          "account_desc": "Fx gain / loss (Others)",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "555064",
+          "account_desc": "Real'd P/L-FX Trading",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "555065",
+          "account_desc": "Unreal'd P/L-FX Trading",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "555078",
+          "account_desc": "FX Carry Forward - FCYPL(OPI)",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "555080",
+          "account_desc": "FX Carry Forward - FCYPL(MX3)",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "559002",
+          "account_desc": "Unreal'd P/L-Deriv (Manual)",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "559072",
+          "account_desc": "GLEL EL Financial Allocation",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "559926",
+          "account_desc": "TP In CAL Revenue Prior Yr",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "559927",
+          "account_desc": "Group TP IN Revenue CY",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "576050",
+          "account_desc": "Currency Rounding Difference",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "611702",
+          "account_desc": "Perf.Bonus-CurrentYr NonBanded",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "611728",
+          "account_desc": "RSS_RSA Equity Settled",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "611733",
+          "account_desc": "Deferred Cash Awards",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "613001",
+          "account_desc": "Training-Internal",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "636001",
+          "account_desc": "Insur/Taka on Premises & Plant",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "659001",
+          "account_desc": "Insurance-Non Prem & Eqpt",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "662011",
+          "account_desc": "Group TP IN Cost CY",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "662017",
+          "account_desc": "FGCR Mark up In",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665029",
+          "account_desc": "TP In to Spoke from SC GBS MY",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665030",
+          "account_desc": "TP In to Spoke from SC GBS IN",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665038",
+          "account_desc": "TPS Cross Border-Recharge IN",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665091",
+          "account_desc": "TP In to Spoke from SC GBS Pol",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665172",
+          "account_desc": "Proj Opex Host2End- Others-FC",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665215",
+          "account_desc": "Proj OPEX Recharges (FFG)",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665277",
+          "account_desc": "TPS In Country-Recharge IN",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665278",
+          "account_desc": "TPS In Country-Recharge OUT",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665280",
+          "account_desc": "Proj OPEX Host2End -Actuals-IC",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665281",
+          "account_desc": "Proj OPEX Host2End-Actuals-TC",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665282",
+          "account_desc": "Proj OPEX Host2End - FCST - IC",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665283",
+          "account_desc": "Proj OPEX Host2End - FCST - TC",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665306",
+          "account_desc": "Project Opex Mark Up Passback",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "665307",
+          "account_desc": "TPS Mark Up Passback",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "669130",
+          "account_desc": "Tech Prod Support Recharge In",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "669131",
+          "account_desc": "Tech Prod Support Recharge Out",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "711212",
+          "account_desc": "B/D -LN To Cu-AMC",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "711221",
+          "account_desc": "B/D Prov-AMC-Dir Cr Sub",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "711222",
+          "account_desc": "B/D Prov-AMC-Tran Cont",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "799001",
+          "account_desc": "FCY P/L-Offset",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        },
+        {
+          "account": "799002",
+          "account_desc": "FCY P/L-Offset - Revaluation",
+          "bs_mapping": "L-PL",
+          "currency": "FRX",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Profits And Losses During Period",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "label": "L-CAPITAL Forex Matches Head / Capital Capital Subscriber Thereof Forex",
+      "currency": "FRX",
+      "rule_type": "MANUAL_CLUB",
+      "tb_side": [
+        {
+          "account": "206001",
+          "account_desc": "H.O assigned Cap-N-Int Bearing",
+          "bs_mapping": "L-CAPITAL",
+          "currency": "FRX",
+          "sign": 1
+        }
+      ],
+      "submission_side": [
+        {
+          "match_text": "Head / Capital Capital Subscriber Thereof",
+          "sheet": "Liabilities",
+          "currency": "IQD",
+          "is_total": false,
+          "sign": -1
+        }
+      ]
+    }
+  ]
+}
