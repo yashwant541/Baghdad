@@ -1,0 +1,661 @@
+You are an expert Python, pandas, openpyxl, Excel, and Dataiku developer.
+
+Build a complete, production-ready Excel processing solution for the supplied workbook:
+
+"Outstanding Report - IRAQ-30 June.26 .xlsx"
+
+The solution must read the raw outstanding-report data, identify the correct source worksheet and header row dynamically, standardize the required columns, validate the data, and reproduce the business logic represented by the two supplied Excel PivotTable screenshots.
+
+Do not merely describe the approach. Produce complete, executable code.
+
+==================================================
+1. SOURCE WORKBOOK AND DATA STRUCTURE
+==================================================
+
+The workbook contains outstanding-report data with fields such as:
+
+- CATEGORY
+- CUST_SEGMENT
+- SECTION_ID
+- SEGMENT NAME (SEC ID)
+- CUSTOMER_ID
+- CUSTOMER NAME
+- CUSTOMER_REF_NO
+- DEAL_NUMBER
+- STEP_ID
+- PROCESS DATE
+- BILL_CCY
+- BILL_AMOUNT
+- DEAL_CCY
+- DEAL_BAL
+- SIGHT(Y/n)
+- AVAILISATION (Y/N)
+- FINANCED
+- FIN_TYPE
+- STATUS
+- FIN STATUS DESC
+- ACCEPTED MATURITY DATE
+- FIN_START_DATE
+- FIN_DUE_DATE
+- FINANCE_NUMBER
+- FIN_OUS_CCY
+- FIN_OUSTANDING AMT
+- MAR_CURRENCY
+- MARGIN BALANCE
+- EXP_DUE_DATE/MATURITY_DATE
+- Days o/s
+- CCIS_ID
+- DOC_PREP
+- CONFIRM_Y_N
+- CONFIRM_AMOUNT
+- DISCREPANT DOC
+- DOC_IN_ORDER
+- ISB
+- RMT
+- COL
+- ADV
+- RMB
+- APB
+- BENE/DRAWER
+- APPLICANT/DRAWEE
+- ACTUAL APPLICANT
+- LC/GTEE DESC
+- Rate or equivalent exchange-rate field
+- Equ-IQD
+- Bucket
+
+The workbook may contain multiple worksheets, including raw-data sheets, existing pivot sheets, support sheets, and exchange-rate sheets.
+
+Do not assume that:
+
+- The first worksheet is always the correct source.
+- The header is always on row 1.
+- Every workbook uses exactly the same worksheet name.
+- Column names have perfectly consistent spaces or capitalization.
+- Blank rows or blank columns are absent.
+- CATEGORY is populated on every row.
+- Excel PivotTable output sheets should be treated as raw transactional data.
+
+For example, the source workbook may contain:
+
+- A sheet where the header starts on row 2.
+- Another sheet where the header starts on row 1.
+- Existing pivot or summary sheets that must not be mistaken for source data.
+
+The program must examine candidate worksheets and select the best raw-data sheet based on the presence of mandatory fields.
+
+Mandatory source fields:
+
+- CATEGORY
+- BILL_CCY
+- LC/GTEE DESC
+- Equ-IQD
+- Bucket
+
+Prefer a worksheet containing the greatest number of recognized raw-data fields and valid detail rows.
+
+Exclude worksheets that appear to contain only pivot outputs, summaries, exchange rates, or report totals.
+
+==================================================
+2. DYNAMIC HEADER DETECTION
+==================================================
+
+Search the first 20 rows of every candidate worksheet.
+
+For each row:
+
+1. Read all nonblank cells.
+2. Normalize the cell text.
+3. Count how many recognized field names are present.
+4. Select the row with the highest valid header-field match.
+5. Accept the row as the header only when the mandatory columns can be resolved.
+
+Header normalization must:
+
+- Convert values to strings.
+- Trim leading and trailing spaces.
+- Replace repeated internal spaces with a single space.
+- Compare case-insensitively.
+- Preserve the original display label separately.
+- Handle trailing spaces, such as "Equ-IQD ".
+- Treat minor variations such as the following as equivalent:
+
+  "Equ-IQD"
+  "Equ-IQD "
+  "EQU-IQD"
+  "Equ IQD"
+
+  "LC/GTEE DESC"
+  "LC / GTEE DESC"
+  "LC-GTEE DESC"
+
+  "BILL_CCY"
+  "BILL CCY"
+
+  "CATEGORY"
+  "Category"
+
+  "Bucket"
+  "BUCKET"
+
+Do not identify columns by fixed Excel column letters.
+
+==================================================
+3. DATA CLEANING AND STANDARDIZATION
+==================================================
+
+Once the raw-data sheet and header row are identified:
+
+1. Read all rows below the detected header.
+2. Remove completely blank rows.
+3. Remove completely blank columns.
+4. Remove repeated header rows appearing inside the data.
+5. Standardize the required column names internally to:
+
+   CATEGORY
+   BILL_CCY
+   LC_GTEE_DESC
+   EQUI_IQD
+   BUCKET
+
+6. Trim spaces from all text grouping fields.
+7. Normalize blank strings, whitespace-only strings, "nan", "None", and similar values to null.
+8. Convert EQUI_IQD to numeric.
+9. Remove commas, currency symbols, and unnecessary spaces before numeric conversion.
+10. Preserve negative values.
+11. Do not silently convert invalid nonnumeric values to zero.
+12. Record rows with invalid EQUI_IQD values in a validation report.
+13. Do not arbitrarily forward-fill CATEGORY, BILL_CCY, LC/GTEE DESC, or Bucket unless explicit source-format evidence proves the workbook uses merged-cell continuation.
+14. Preserve missing grouping values and show them as "(blank)" in pivot-style output where appropriate.
+
+The sum used in all pivots must be based on the cleaned numeric EQUI_IQD field.
+
+Display the measure as:
+
+"Sum of Equ-IQD"
+
+==================================================
+4. PIVOT 1: CATEGORY, LC/GTEE DESCRIPTION, AND CURRENCY BY BUCKET
+==================================================
+
+Reproduce the logical configuration shown in the first screenshot.
+
+Pivot 1 field arrangement:
+
+Filters:
+- None
+
+Columns:
+- Bucket
+
+Rows, in this exact hierarchical order:
+1. CATEGORY
+2. LC/GTEE DESC
+3. BILL_CCY
+
+Values:
+- Sum of Equ-IQD
+
+Equivalent pandas logic:
+
+pivot_1 = pandas.pivot_table(
+    source_data,
+    index=["CATEGORY", "LC_GTEE_DESC", "BILL_CCY"],
+    columns=["BUCKET"],
+    values="EQUI_IQD",
+    aggfunc="sum",
+    fill_value=0,
+    margins=True,
+    margins_name="Grand Total",
+    dropna=False
+)
+
+Business meaning:
+
+- First group records by CATEGORY.
+- Within each CATEGORY, group records by LC/GTEE DESC.
+- Within each LC/GTEE DESC, split records by BILL_CCY.
+- Across columns, split the summed Equ-IQD amount by Bucket.
+- Include row totals and column totals.
+- The final result must allow a reviewer to understand which category, LC/guarantee description, and billing currency contribute to each maturity or aging bucket.
+
+Required Pivot 1 output structure:
+
+Rows:
+CATEGORY
+    LC/GTEE DESC
+        BILL_CCY
+
+Columns:
+Each distinct Bucket value
+Grand Total
+
+Values:
+Sum of Equ-IQD
+
+If the source contains blank Bucket values, include a "(blank)" bucket unless the configured blank-handling rule explicitly excludes it.
+
+The output must not apply any CATEGORY filter.
+
+Suggested output-sheet name:
+
+"Pivot_Category_Bucket"
+
+==================================================
+5. PIVOT 2: LC/GTEE DESCRIPTION BY BILLING CURRENCY
+==================================================
+
+Reproduce the logical configuration shown in the second screenshot.
+
+Pivot 2 field arrangement:
+
+Filters:
+- CATEGORY
+
+Columns:
+- BILL_CCY
+
+Rows:
+- LC/GTEE DESC
+
+Values:
+- Sum of Equ-IQD
+
+Equivalent pandas logic before applying an optional selected-category filter:
+
+filtered_data = source_data
+
+if a category has been selected:
+    filtered_data = source_data[
+        source_data["CATEGORY"] == selected_category
+    ]
+
+pivot_2 = pandas.pivot_table(
+    filtered_data,
+    index=["LC_GTEE_DESC"],
+    columns=["BILL_CCY"],
+    values="EQUI_IQD",
+    aggfunc="sum",
+    fill_value=0,
+    margins=True,
+    margins_name="Grand Total",
+    dropna=False
+)
+
+Business meaning:
+
+- CATEGORY behaves as a report-level filter.
+- LC/GTEE DESC appears as the row dimension.
+- BILL_CCY appears across columns.
+- Equ-IQD is summed for every LC/GTEE-description and billing-currency combination.
+- Include row totals and column totals.
+- When no category is selected, use all categories.
+- When a category is selected, filter the source rows before aggregation.
+
+The screenshot represents CATEGORY as a PivotTable filter, not as a row or column field.
+
+Required Pivot 2 output structure:
+
+Filter/control:
+CATEGORY
+
+Rows:
+LC/GTEE DESC
+
+Columns:
+Each distinct BILL_CCY value
+Grand Total
+
+Values:
+Sum of Equ-IQD
+
+Possible billing-currency columns may include values such as:
+
+- EUR
+- GBP
+- IQD
+- USD
+- JPY
+- (blank)
+
+Do not hardcode this list. Derive the available currencies from the source data.
+
+Suggested output-sheet name:
+
+"Pivot_LCGTEE_Currency"
+
+==================================================
+6. CATEGORY FILTER BEHAVIOR
+==================================================
+
+The solution must support two modes.
+
+Mode A: All categories
+
+- No source rows are excluded by CATEGORY.
+- Pivot 2 displays the aggregation for the complete dataset.
+
+Mode B: Selected category
+
+- Accept a category value as a configurable parameter.
+- Validate the selected value against the distinct CATEGORY values in the source data.
+- Filter the source data using an exact normalized match.
+- Generate Pivot 2 using only the selected category.
+- Display the selected category clearly above the report.
+
+If the supplied category does not exist:
+
+- Do not silently produce an empty pivot.
+- Raise a clear validation message.
+- Include the list of available category values.
+
+Pivot 1 must remain unfiltered unless a separate Pivot 1 filter parameter is explicitly configured.
+
+==================================================
+7. BUCKET LOGIC
+==================================================
+
+Use the existing Bucket field when the source data contains a populated Bucket column.
+
+Do not recreate, reinterpret, or overwrite existing Bucket classifications without an explicit business rule.
+
+Validate the Bucket field by reporting:
+
+- Distinct bucket labels.
+- Number of rows with a blank bucket.
+- Sum of Equ-IQD by bucket.
+- Whether leading or trailing spaces created duplicate-looking values.
+
+Normalize whitespace while preserving the business labels.
+
+For example, values such as:
+
+"0-30 Days"
+"0-30 Days "
+" 0-30 Days"
+
+should be treated as the same grouping value after trimming.
+
+If Bucket is missing entirely, stop Pivot 1 generation and issue a clear error identifying the missing field.
+
+==================================================
+8. EQUI-IQD VALUE LOGIC
+==================================================
+
+The PivotTable screenshots use:
+
+"Sum of Equ-IQD"
+
+Therefore, the main aggregation measure must be the source field Equ-IQD.
+
+If Equ-IQD already exists and contains valid values:
+
+- Use the existing values.
+- Do not overwrite them unnecessarily.
+
+If Equ-IQD is formula-driven:
+
+- Read the calculated values when available.
+- Also retain formula-awareness for diagnostics if the implementation supports it.
+- Do not treat formula text as a numeric amount.
+
+If the source data requires Equ-IQD to be calculated from an amount and exchange rate, implement the calculation only when the workbook or supplied mapping explicitly provides the rule.
+
+Do not invent a currency-conversion formula.
+
+Before creating the pivots, reconcile:
+
+sum of valid cleaned EQUI_IQD source rows
+
+against:
+
+the Pivot 1 Grand Total
+the Pivot 2 Grand Total when all categories are selected
+
+The totals must agree, subject only to documented exclusions such as invalid numeric rows.
+
+==================================================
+9. OUTPUT WORKBOOK
+==================================================
+
+Create a new output workbook rather than overwriting the source workbook.
+
+Suggested output filename:
+
+"Outstanding_Report_IRAQ_Pivot_Output.xlsx"
+
+Include these worksheets:
+
+1. "Source_Cleaned"
+   - Cleaned source records used in aggregation.
+   - Retain the relevant original columns.
+   - Clearly identify invalid or excluded records if any.
+
+2. "Pivot_Category_Bucket"
+   - Pivot 1 output.
+   - CATEGORY, LC/GTEE DESC, and BILL_CCY as nested rows.
+   - Bucket as columns.
+   - Sum of Equ-IQD as values.
+   - Grand totals included.
+
+3. "Pivot_LCGTEE_Currency"
+   - Pivot 2 output.
+   - CATEGORY selection shown above the table.
+   - LC/GTEE DESC as rows.
+   - BILL_CCY as columns.
+   - Sum of Equ-IQD as values.
+   - Grand totals included.
+
+4. "Validation"
+   - Source workbook name.
+   - Selected source sheet.
+   - Detected header row.
+   - Number of source rows read.
+   - Number of cleaned detail rows.
+   - Number of invalid EQUI_IQD rows.
+   - Number of blank CATEGORY rows.
+   - Number of blank LC/GTEE DESC rows.
+   - Number of blank BILL_CCY rows.
+   - Number of blank Bucket rows.
+   - Source EQUI_IQD total.
+   - Pivot 1 Grand Total.
+   - Pivot 2 Grand Total.
+   - Reconciliation difference.
+   - Distinct CATEGORY values.
+   - Distinct BILL_CCY values.
+   - Distinct Bucket values.
+   - Any missing mandatory fields or warnings.
+
+==================================================
+10. EXCEL PRESENTATION
+==================================================
+
+Format both pivot-like outputs professionally.
+
+Requirements:
+
+- Use a dark blue header fill with white bold text.
+- Freeze panes below the report header.
+- Apply filters where practical.
+- Use indentation or repeated labels to make row hierarchy understandable.
+- Apply numeric formatting to Equ-IQD values.
+- Show zero values as "-".
+- Show negative values in red and parentheses.
+- Bold subtotal and Grand Total rows.
+- Apply a strong upper border to Grand Total rows.
+- Auto-size columns with sensible maximum widths.
+- Keep original category, currency, description, and bucket labels readable.
+- Avoid unnecessary borders around every data cell.
+- Include a title describing each report.
+
+Pivot 1 title:
+
+"Equ-IQD by Category, LC/GTEE Description, Billing Currency and Bucket"
+
+Pivot 2 title:
+
+"Equ-IQD by LC/GTEE Description and Billing Currency"
+
+For Pivot 2, include:
+
+"Selected CATEGORY: All"
+
+or:
+
+"Selected CATEGORY: <selected category>"
+
+==================================================
+11. PANDAS MULTI-INDEX OUTPUT
+==================================================
+
+When exporting pandas pivot tables:
+
+- Reset or manage the MultiIndex carefully.
+- Ensure all row hierarchy labels appear in separate readable columns.
+- Do not leave index names as unnamed columns.
+- Do not create duplicate Grand Total rows.
+- Do not convert category labels into numeric values.
+- Preserve the intended row order:
+
+Pivot 1:
+CATEGORY → LC/GTEE DESC → BILL_CCY
+
+Pivot 2:
+LC/GTEE DESC
+
+Ensure the Grand Total column is positioned at the far right.
+
+If a "(blank)" column is generated, position the column immediately before Grand Total unless a source-defined ordering exists.
+
+==================================================
+12. SORTING
+==================================================
+
+Use stable and predictable sorting.
+
+Default sorting:
+
+- CATEGORY alphabetically.
+- LC/GTEE DESC alphabetically within CATEGORY.
+- BILL_CCY alphabetically within LC/GTEE DESC.
+- Currency columns alphabetically, with "(blank)" placed last before Grand Total.
+- Bucket columns should preserve a meaningful source or business order when available.
+
+Do not sort bucket labels lexicographically if doing so creates an illogical sequence.
+
+If bucket labels represent ordered periods, derive a sortable lower-bound value only for sorting purposes while preserving the original display label.
+
+==================================================
+13. VALIDATION AND EDGE CASES
+==================================================
+
+Handle the following conditions explicitly:
+
+- Header located below row 1.
+- Trailing spaces in column names.
+- Duplicate-looking columns after normalization.
+- Blank CATEGORY.
+- Blank LC/GTEE DESC.
+- Blank BILL_CCY.
+- Blank Bucket.
+- Blank or invalid Equ-IQD.
+- Negative Equ-IQD.
+- Duplicate transaction rows.
+- Multiple source-sheet candidates.
+- Existing pivot worksheets.
+- Formula cells without cached values.
+- Mixed text and numeric amount formats.
+- Currency codes with leading or trailing spaces.
+- Empty source dataset after cleaning.
+- A selected category with no matching records.
+
+Do not automatically remove duplicate transactional rows unless an exact business key is supplied.
+
+Instead, identify potential duplicate rows in the Validation sheet using available identifying fields such as:
+
+- CUSTOMER_ID
+- CUSTOMER_REF_NO
+- DEAL_NUMBER
+- STEP_ID
+- PROCESS DATE
+- BILL_CCY
+- BILL_AMOUNT
+- Equ-IQD
+
+==================================================
+14. DATAIKU COMPATIBILITY
+==================================================
+
+If implementing the solution as a Dataiku Python recipe:
+
+- Read the input workbook from a Dataiku managed folder.
+- Support selection of a specific Excel file.
+- Do not assume a local fixed path.
+- Discover workbook sheets dynamically.
+- Write the generated workbook to an output managed folder.
+- Use temporary local files only when required by the Excel-reading library.
+- Clean up temporary files.
+- Produce clear logging for:
+  - Input filename.
+  - Detected source sheet.
+  - Detected header row.
+  - Selected category.
+  - Record counts.
+  - Source total.
+  - Pivot totals.
+  - Validation errors.
+  - Output filename.
+
+Keep the processing logic modular.
+
+Suggested functions:
+
+- normalize_header()
+- normalize_group_value()
+- detect_header_row()
+- score_source_sheet()
+- select_source_sheet()
+- read_source_data()
+- standardize_columns()
+- clean_numeric_field()
+- validate_source_data()
+- build_category_bucket_pivot()
+- build_lcgtee_currency_pivot()
+- order_pivot_columns()
+- write_pivot_sheet()
+- write_validation_sheet()
+- create_output_workbook()
+- process_selected_workbook()
+
+==================================================
+15. REQUIRED DELIVERABLE
+==================================================
+
+Return one complete, executable Python implementation.
+
+The code must:
+
+1. Read the supplied Excel workbook.
+2. Detect the raw-data sheet and header dynamically.
+3. Standardize the required fields.
+4. Clean and validate Equ-IQD.
+5. Build Pivot 1 exactly as:
+
+   Filters: None
+   Columns: Bucket
+   Rows: CATEGORY → LC/GTEE DESC → BILL_CCY
+   Values: Sum of Equ-IQD
+
+6. Build Pivot 2 exactly as:
+
+   Filter: CATEGORY
+   Columns: BILL_CCY
+   Rows: LC/GTEE DESC
+   Values: Sum of Equ-IQD
+
+7. Include Grand Totals.
+8. Reconcile pivot totals to the cleaned source data.
+9. Generate the formatted output workbook.
+10. Provide clear errors rather than silently generating incorrect results.
+11. Avoid hardcoded worksheet names, header-row numbers, Excel column letters, currency values, category values, and bucket values.
+12. Preserve the existing business structure and do not invent missing calculation logic.
