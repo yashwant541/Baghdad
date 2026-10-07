@@ -66,29 +66,36 @@ def normalize_header(v):
 
 
 def normalize_group_value(v):
-    """Trim, collapse inner spaces, and turn blank / 'nan' / 'None' style values into None."""
+    """The label exactly as it is written in the sheet; an empty cell is None (shown as (blank))."""
     if v is None:
         return None
-    if isinstance(v, float) and math.isnan(v):
-        return None
-    s = re.sub(r"\s+", " ", str(v)).strip()
-    return None if s.lower() in NULL_TEXT else s
+    if isinstance(v, float):
+        if math.isnan(v):
+            return None
+        if v.is_integer():
+            return str(int(v))
+    s = str(v)
+    return None if s.strip() == "" else s
 
 
 def clean_numeric_field(value):
-    """-> (number or None, status) with status 'ok' | 'blank' | 'invalid'. Strips commas, spaces and
-    currency symbols, reads (1,234) and 1,234- as negatives, never turns a bad value into 0."""
+    """-> (number or None, status) with status 'ok' | 'blank' | 'invalid' - the way an Excel PivotTable sees it: a number
+    is summed, an empty cell or text is not (text is never converted and never turned into 0)."""
     if value is None:
         return None, "blank"
     if isinstance(value, bool):
         return None, "invalid"
     if isinstance(value, (int, float, np.integer, np.floating)):
         f = float(value)
+        if math.isnan(f):
+            return None, "blank"                      # an empty cell
         return (f, "ok") if math.isfinite(f) else (None, "invalid")
-    s = str(value).strip()
-    if s.lower() in NULL_TEXT:
-        return None, "blank"
-    s = s.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩٬٫", "0123456789,."))
+    return (None, "blank") if str(value).strip() == "" else (None, "invalid")
+
+
+def loose_number(value):
+    """For information only (never used in a total): the number a text such as '1,234.5' or '(250)' looks like, else None."""
+    s = str(value).strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩٬٫", "0123456789,."))
     t = re.sub(r"[,\s$€£¥]", "", s)
     neg = False
     if t.startswith("(") and t.endswith(")"):
@@ -96,9 +103,8 @@ def clean_numeric_field(value):
     if t.endswith("-") and t.count("-") == 1:
         neg, t = True, t[:-1]
     if re.fullmatch(r"[-+]?\d+(\.\d+)?", t):
-        f = float(t)
-        return (-f if neg else f), "ok"
-    return None, "invalid"
+        return -float(t) if neg else float(t)
+    return None
 
 
 # ------------------------------------------------------------------------------ sheet + header detection
@@ -172,7 +178,8 @@ def read_source_data(path, sheet=None):
     xls = pd.ExcelFile(path, engine="openpyxl")
     candidates, raws = [], {}
     for name in xls.sheet_names:
-        raw = xls.parse(name, header=None, dtype=object)
+        # keep_default_na=False: pandas would otherwise turn the text "N/A" / "NA" / "null" into an empty cell
+        raw = xls.parse(name, header=None, dtype=object, keep_default_na=False, na_values=[""])
         raws[name] = raw
         candidates.append(score_source_sheet(name, raw))
     chosen = select_source_sheet(candidates, sheet)
@@ -191,6 +198,7 @@ def read_source_data(path, sheet=None):
     df = raw.iloc[head["row"] + 1:].copy()
     df.columns = labels
     df = df.reset_index(drop=True)
+    df["_SRC_ROW"] = [head["row"] + 2 + i for i in range(len(df))]            # Excel row number of every data row
     info = {"sheet": chosen["sheet"], "header_row": head["row"] + 1, "resolved": dict(head["resolved"]),
             "labels": labels, "candidates": [(c["sheet"], c["score"], c["reason"]) for c in candidates]}
     return df, info
@@ -205,8 +213,10 @@ def standardize_columns(df, info):
         rename[labels[j]] = std
         original[std] = labels[j]
     blank = lambda v: v is None or (isinstance(v, float) and math.isnan(v)) or str(v).strip() == ""
-    df = df.loc[:, [c for c in df.columns if not df[c].map(blank).all()]]
-    df = df.loc[~df.apply(lambda r: all(blank(v) for v in r), axis=1)].reset_index(drop=True)
+    df = df.loc[:, [c for c in df.columns if c == "_SRC_ROW" or not df[c].map(blank).all()]]
+    is_blank_row = df.apply(lambda r: all(blank(v) for k, v in r.items() if k != "_SRC_ROW"), axis=1)
+    info["blank_rows_removed"] = int(is_blank_row.sum())
+    df = df.loc[~is_blank_row].reset_index(drop=True)
     # a header row repeated inside the data (copy-pasted blocks)
     keys_row = {c: _key(c) for c in rename if c in df.columns}
     if keys_row:
@@ -221,16 +231,28 @@ def standardize_columns(df, info):
 
 
 def clean_source_data(df):
-    """Trim the grouping fields, convert Equ-IQD, and keep a per-row status instead of guessing."""
+    """A plain pivot source: the grouping labels as written, Equ-IQD read the way Excel reads it. Nothing is corrected.
+    Rows that cannot be summed (empty / text Equ-IQD) are kept with a status so they can be listed, and a row that
+    looks like a total line typed under the data is only flagged - it is counted, as an Excel pivot would."""
     df = df.copy()
     for col in ("CATEGORY", "BILL_CCY", "LC_GTEE_DESC", "BUCKET"):
         df[col] = df[col].map(normalize_group_value)
-    # currency codes are upper-case by nature ('usd ' and 'USD' are one currency)
-    df["BILL_CCY"] = df["BILL_CCY"].map(lambda x: x.upper() if isinstance(x, str) else x)
     parsed = df["EQUI_IQD"].map(clean_numeric_field)
     df["_EQUI_RAW"] = df["EQUI_IQD"]
     df["EQUI_IQD"] = parsed.map(lambda x: x[0])
     df["_STATUS"] = parsed.map(lambda x: x[1])
+    no_group = df[["CATEGORY", "BILL_CCY", "LC_GTEE_DESC", "BUCKET"]].isna().all(axis=1)
+    run, looks = 0.0, []
+    for i in df.index:
+        if df.at[i, "_STATUS"] != "ok":
+            looks.append(False)
+            continue
+        amt = float(df.at[i, "EQUI_IQD"])
+        flag = bool(no_group[i] and run and abs(amt - run) <= max(1.0, 1e-6 * abs(run)))
+        looks.append(flag)
+        if not flag:
+            run += amt
+    df["_LOOKS_TOTAL"] = looks
     return df
 
 
@@ -257,6 +279,7 @@ def validate_source_data(df, info, source_name):
         ("Repeated header rows removed", int(info.get("repeated_headers_removed", 0))),
         ("Rows with blank Equ-IQD (excluded)", int((df["_STATUS"] == "blank").sum())),
         ("Rows with invalid / non-numeric Equ-IQD (excluded)", int((df["_STATUS"] == "invalid").sum())),
+        ("Rows that look like a total line typed under the data (counted)", int(df["_LOOKS_TOTAL"].sum())),
         ("Rows with blank CATEGORY", nblank("CATEGORY")),
         ("Rows with blank LC/GTEE DESC", nblank("LC_GTEE_DESC")),
         ("Rows with blank BILL_CCY", nblank("BILL_CCY")),
@@ -400,15 +423,44 @@ def process_outstanding(path, source_name=None, category=None, sheet=None):
     if abs(diff1) > 0.005 or abs(diff2) > 0.005:
         warnings.append("Pivot grand totals do not agree with the cleaned source total (difference %s / %s)." %
                         (format(diff1, ",.2f"), format(diff2, ",.2f")))
-    n_bad = int((df["_STATUS"] != "ok").sum())
-    if n_bad:
-        warnings.append("%d row(s) have a blank or non-numeric Equ-IQD and are excluded from every total (see Validation)." % n_bad)
+    n_tot = int(df["_LOOKS_TOTAL"].sum())
+    if n_tot:
+        warnings.append("%d row(s) look like a total line typed under the data (no category, description, currency or bucket, and the amount equals "
+                        "the sum of the rows above). They ARE counted, as in an Excel PivotTable - see the Row_Exceptions sheet." % n_tot)
+    # what Excel itself gives for the raw Equ-IQD column: numbers are summed, empty cells and text are not
+    raw_col = info["labels"][info["resolved"]["EQUI_IQD"]]
+    is_num = lambda v: isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool) and math.isfinite(float(v))
+    excel_total = float(sum(float(v) for v in raw_df[raw_col] if is_num(v)))
+    diff_excel = src_total - excel_total
+    texts = df[df["_STATUS"] == "invalid"]
+    like = [(r["_SRC_ROW"], loose_number(r["_EQUI_RAW"])) for r in texts.to_dict("records")]
+    like = [(row, v) for row, v in like if v is not None]
+    like_total = float(sum(v for _, v in like))
+    n_blank = int((df["_STATUS"] == "blank").sum())
+    if len(texts) or n_blank:
+        msg = "%d row(s) have an empty Equ-IQD and %d have text in it; they are not in any total (an Excel PivotTable ignores them too)" % (n_blank, len(texts))
+        if like:
+            msg += ", and %d of the text values read as numbers (%s in all) - see the Row_Exceptions sheet" % (len(like), format(like_total, ",.2f"))
+        warnings.append(msg + ".")
+    exc = df[(df["_STATUS"] != "ok") | df["_LOOKS_TOTAL"]].copy()
+    looked = dict((row, v) for row, v in like)
+    exc["_WHY"] = [("COUNTED: looks like a total line typed under the data" if lt else
+                    "IGNORED: empty Equ-IQD" if st == "blank" else
+                    ("IGNORED: text that reads as the number %s" % format(looked[sr], ",.2f")) if sr in looked else "IGNORED: text, not a number")
+                   for st, lt, sr in zip(exc["_STATUS"], exc["_LOOKS_TOTAL"], exc["_SRC_ROW"])]
+    validation += [("Rows dropped as completely blank", int(info.get("blank_rows_removed", 0))),
+                   ("Excel-style total of the raw Equ-IQD column (numeric cells only)", excel_total),
+                   ("Equ-IQD cells ignored because they hold text", int(len(texts))),
+                   ("of which read as numbers (not counted)", int(len(like))),
+                   ("Amount those would add if they were counted", like_total),
+                   ("Difference: pivot total - Excel-style total of the raw column", diff_excel)]
     validation += [("Pivot 1 Grand Total (all categories)", p1_all["grand_total"]),
                    ("Pivot 1 Grand Total (as selected)", p1["grand_total"]), ("Pivot 2 Grand Total", p2["grand_total"]),
                    ("Reconciliation difference (source - Pivot 1)", diff1), ("Reconciliation difference (source - Pivot 2)", diff2),
                    ("Warnings", "; ".join(warnings) or "none")]
     categories = _sorted_text(list(df["CATEGORY"].fillna(BLANK).unique()))
-    return {"info": info, "df": df, "pivot1": p1, "pivot2": p2, "validation": validation, "warnings": warnings,
+    return {"info": info, "df": df, "exceptions": exc, "excel_total": excel_total, "pivot1": p1, "pivot2": p2,
+            "validation": validation, "warnings": warnings,
             "categories": categories, "source_total": src_total, "selected_category": p1["flat"]["category"]}
 
 
@@ -525,10 +577,10 @@ def create_output_workbook(result, out_path):
     df = result["df"]
     orig = result["info"].get("original_labels", {})
     cols = [c for c in df.columns if c not in ("_EQUI_RAW", "_STATUS")]
-    ws.append([orig.get(c, c) for c in cols] + ["Row status"])
+    ws.append([("Source row" if c == "_SRC_ROW" else orig.get(c, c)) for c in cols] + ["Row status"])
     for c in ws[1]:
         c.fill, c.font = HEADER_FILL, HEADER_FONT
-    status_text = {"ok": "", "blank": "EXCLUDED: blank Equ-IQD", "invalid": "EXCLUDED: invalid Equ-IQD"}
+    status_text = {"ok": "", "blank": "IGNORED: empty Equ-IQD", "invalid": "IGNORED: text in Equ-IQD"}
     for rec, st, raw_amt in zip(df[cols].itertuples(index=False), df["_STATUS"], df["_EQUI_RAW"]):
         row = [None if (isinstance(v, float) and math.isnan(v)) else v for v in rec]
         if st != "ok":
@@ -542,6 +594,18 @@ def create_output_workbook(result, out_path):
     write_pivot_sheet(wb.create_sheet("Pivot_LCGTEE_Currency"), result["pivot1"]["flat"], header_row=4,
                       subtitle="Selected CATEGORY: %s" % (sel if sel else "All"))
     write_pivot_sheet(wb.create_sheet("Pivot_Category_Bucket"), result["pivot2"]["flat"])
+    ex = result.get("exceptions")
+    if ex is not None and len(ex):
+        we = wb.create_sheet("Row_Exceptions")
+        we.append(["Source row", "Why", "Equ-IQD as found", "Equ-IQD used", "CATEGORY", "LC/GTEE DESC", "BILL_CCY", "Bucket"])
+        for c in we[1]:
+            c.fill, c.font = HEADER_FILL, HEADER_FONT
+        for d in ex.to_dict("records"):
+            we.append([d.get("_SRC_ROW"), d["_WHY"], None if d["_EQUI_RAW"] is None else str(d["_EQUI_RAW"]),
+                       None if (isinstance(d["EQUI_IQD"], float) and math.isnan(d["EQUI_IQD"])) else d["EQUI_IQD"],
+                       d["CATEGORY"], d["LC_GTEE_DESC"], d["BILL_CCY"], d["BUCKET"]])
+        _autosize(we, 44)
+        we.freeze_panes = "A2"
     write_validation_sheet(wb.create_sheet("Validation"), result["validation"])
     wb.save(out_path)
     return out_path

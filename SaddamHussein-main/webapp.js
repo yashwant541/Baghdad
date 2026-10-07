@@ -244,7 +244,8 @@ function renderOutstanding(){
     (j.warnings||[]).map(w=>`<div class="notice">${esc(w)}</div>`).join('');
   $('obKpis').innerHTML=[['Rows read',val['Source rows read']],['Detail rows',val['Cleaned detail rows']],
     ['Invalid / blank Equ-IQD',(val['Rows with invalid / non-numeric Equ-IQD (excluded)']||0)+(val['Rows with blank Equ-IQD (excluded)']||0)],
-    ['Source total',val['Source Equ-IQD total (valid rows)']],['Difference',val['Reconciliation difference (source - Pivot 1)']]]
+    ['Pivot total',val['Source Equ-IQD total (valid rows)']],['Excel SUM of the raw column',val['Excel-style total of the raw Equ-IQD column (numeric cells only)']],
+    ['Pivot - Excel SUM',val['Difference: pivot total - Excel-style total of the raw column']]]
     .map(([k,v])=>`<div class="kpi"><small>${esc(k)}</small><b>${esc(fmt(v))}</b></div>`).join('');
   const sel=$('obCategory');
   sel.innerHTML=['<option value="">All</option>'].concat((j.categories||[]).map(c=>`<option value="${esc(c)}" ${c===j.selected_category?'selected':''}>${esc(c)}</option>`)).join('');
@@ -1305,6 +1306,9 @@ const AR_DICT={
 "Build pivots": "بناء الجداول المحورية",
 "Download pivot workbook": "تنزيل مصنف الجداول المحورية",
 "Pivot 2 · Category, LC/GTEE and Currency by Bucket": "الجدول المحوري 2 · الفئة وLC/GTEE والعملة حسب الفترة",
+"Pivot total": "إجمالي الجدول المحوري",
+"Excel SUM of the raw column": "مجموع Excel للعمود الخام",
+"Pivot - Excel SUM": "الجدول المحوري - مجموع Excel",
 "Rows: LC/GTEE DESC · Columns: BILL_CCY · Values: Sum of Equ-IQD": "الصفوف: LC/GTEE DESC · الأعمدة: BILL_CCY · القيم: مجموع Equ-IQD",
 "Rows: CATEGORY, LC/GTEE DESC, BILL_CCY · Columns: Bucket · Values: Sum of Equ-IQD": "الصفوف: CATEGORY وLC/GTEE DESC وBILL_CCY · الأعمدة: Bucket · القيم: مجموع Equ-IQD",
 "Filters: none · Columns: Bucket · Values: Sum of Equ-IQD": "المرشحات: لا يوجد · الأعمدة: الفترة · القيم: مجموع المكافئ بالدينار العراقي",
@@ -1342,6 +1346,11 @@ const AR_DICT={
 "Distinct BILL_CCY values": "قيم عملة الفاتورة المميزة",
 "Distinct Bucket values": "قيم الفترات المميزة",
 "Pivot 2 Grand Total": "الإجمالي العام للجدول 2",
+"Rows dropped as completely blank": "صفوف محذوفة لأنها فارغة تمامًا",
+"Excel-style total of the raw Equ-IQD column (numeric cells only)": "مجموع على طريقة Excel لعمود Equ-IQD الخام (الخلايا الرقمية فقط)",
+"Rows whose Equ-IQD is a number stored as text (converted and counted)": "صفوف قيمة Equ-IQD فيها رقم مخزَّن كنص (حُوِّل واحتُسب)",
+"Amount of those rows": "مبلغ هذه الصفوف",
+"Difference: pivot total - Excel-style total of the raw column": "الفرق: إجمالي الجدول المحوري - مجموع العمود الخام على طريقة Excel",
 "Warnings": "التحذيرات",
 "Search": "بحث",
 "Look for every Trial Balance pivot value (BS-mapping and group level) in every non-zero cell of every sheet of each submission file - schedules and matrix sheets included. Each file gets its own workbook: your original sheets, the TB pivot, a matching report, and matched cells highlighted in the same colour on both sides.": "ابحث عن كل قيمة في الجدول المحوري لميزان المراجعة (على مستوى ربط الميزانية والمجموعة) في كل خلية غير صفرية في كل ورقة من كل ملف تقرير - بما في ذلك الجداول الملحقة وأوراق المصفوفات. يحصل كل ملف على مصنفه الخاص: أوراقك الأصلية والجدول المحوري لميزان المراجعة وتقرير المطابقة، مع تظليل الخلايا المتطابقة بنفس اللون في الجانبين.",
@@ -1622,7 +1631,14 @@ const AR_DICT={
 "NO RULE": "لا توجد قاعدة",
 "Sheets read from this file:": "الأوراق المقروءة من هذا الملف:",
 "No rule found a cell in this file. Check that its sheets were selected when extracting and that their row labels match the mapping.": "لم تجد أي قاعدة خلية في هذا الملف. تحقق من تحديد أوراقه عند الاستخراج ومن تطابق تسميات صفوفها مع الربط.",
-"Off-balance sheets were extracted but no Outstanding Report is loaded, so the off-balance checks were skipped (upload it in the Off-Balance step, then press Re-run).": "تم استخراج أوراق خارج الميزانية لكن لم يُحمَّل تقرير الأرصدة القائمة، لذلك تم تخطي فحوصات خارج الميزانية (ارفعه في خطوة خارج الميزانية ثم اضغط إعادة التشغيل)."
+"Off-balance sheets were extracted but no Outstanding Report is loaded, so the off-balance checks were skipped (upload it in the Off-Balance step, then press Re-run).": "تم استخراج أوراق خارج الميزانية لكن لم يُحمَّل تقرير الأرصدة القائمة، لذلك تم تخطي فحوصات خارج الميزانية (ارفعه في خطوة خارج الميزانية ثم اضغط إعادة التشغيل).",
+"Total line(s) typed under the data (inside Excel's SUM, excluded here)": "سطر (أسطر) إجمالي مكتوب تحت البيانات (داخل مجموع Excel ومستبعد هنا)",
+"Check: Excel-style total - total lines + text numbers - pivot total (should be 0)": "تحقق: مجموع Excel - أسطر الإجمالي + الأرقام النصية - إجمالي الجدول المحوري (يجب أن يكون 0)",
+"Rows recognised as a total line typed under the data (excluded)": "صفوف تم التعرف عليها كسطر إجمالي مكتوب تحت البيانات (مستبعدة)",
+"Rows that look like a total line typed under the data (counted)": "صفوف تبدو كسطر إجمالي مكتوب تحت البيانات (محتسبة)",
+"Equ-IQD cells ignored because they hold text": "خلايا Equ-IQD المتجاهلة لأنها تحتوي نصًا",
+"of which read as numbers (not counted)": "منها ما يُقرأ كأرقام (غير محتسب)",
+"Amount those would add if they were counted": "المبلغ الذي ستضيفه لو احتُسبت"
 };
 const AR_RULES=[
 [
