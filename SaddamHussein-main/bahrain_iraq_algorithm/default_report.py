@@ -151,9 +151,9 @@ def _sheet_names(kind, sub, override=None):
         low = str(sh).lower().strip()
         if not low.startswith(k):
             continue
-        if "matur" in low:
+        if "matur" in low or "period" in low or "tenor" in low:      # 'Liabilities According to Period'
             names["maturity"] = sh
-        elif "foreign" in low or "currenc" in low:
+        elif "foreign" in low or "curren" in low:                    # 'Liabilities According to Curren(cy)' - Excel cuts names at 31 characters
             names["foreign"] = sh
         elif low == k:
             names["main"] = sh
@@ -250,6 +250,201 @@ def copy_sub(s0, ccy):
     return [d]
 
 
+# ------------------------------------------------------------------------------------------ off-balance checks
+# The same basic rules as Assets / Liabilities, but the values come from the Outstanding Report pivots:
+#   main sheet ('Off-Balance Sheet Accounts')      IQD column 3 or 4 / foreign column 5 or 6 / total column 2  <- Pivot 2 (LC/GTEE x currency)
+#   'Off-Balance Sheet Accounts by F(oreign ...)'  currency by currency, the rest against 'Other'             <- Pivot 2
+#   'Off-Balance Sheet Accounts by M(aturity)'     one check per maturity bucket column, plus the total       <- Pivot 1 (Bucket columns)
+
+OB_SOURCE = "Outstanding Report"
+_NUMWORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+             "ten": "10", "eleven": "11", "twelve": "12"}
+
+
+def _ob_sheet_names(sub):
+    have = sorted(set(sub.sheet)) if (sub is not None and len(sub)) else []
+    main, foreign, maturity = [], None, None
+    for sh in have:
+        low = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", str(sh).lower())).strip()
+        if not (low.startswith("off") and "balance" in low):
+            continue
+        if "matur" in low or "period" in low or "tenor" in low or low.endswith(" by m"):
+            maturity = sh                                              # 'Off-Balance Sheet Accounts by M' (name cut at 31 characters)
+        elif "foreign" in low or "curren" in low or low.endswith(" by f"):
+            foreign = sh
+        else:
+            main.append(sh)
+    return {"main": min(main, key=len) if main else None, "foreign": foreign, "maturity": maturity}
+
+
+def _sheet_columns(sub, sheet):
+    """[(column letter, header text)] of the extracted cells of a sheet, left to right."""
+    out = {}
+    d = sub[sub.sheet == sheet]
+    for r in d.itertuples(index=False):
+        m = re.match(r"^([A-Z]+)\d+$", str(r.source_cell))
+        if m and m.group(1) not in out:
+            out[m.group(1)] = str(getattr(r, "column_context", "") or "").split(" | ")[0].strip()      # drop the sample value the context carries
+    return [(L, out[L]) for L in sorted(out, key=lambda L: (len(L), L))]
+
+
+def _upper_bound_months(label):
+    """Upper bound, in months, of a maturity label ('1M', '0-30 Days', 'Between Three and Six Months', 'Above 365 Days',
+    'More than five years' ...). inf for an open-ended label, None when nothing can be read."""
+    s = str(label).lower()
+    for w, n in _NUMWORDS.items():
+        s = re.sub(r"\b%s\b" % w, n, s)
+    toks = [(float(a), u) for a, u in re.findall(r"(\d+(?:\.\d+)?)\s*(days?|d\b|months?|mos?\b|m\b|years?|yrs?|y\b)?", s)]
+    if not toks:
+        return None
+    unit = None
+    fixed = []
+    for v, u in reversed(toks):                       # a unit written once applies to the numbers before it ("1-5Y")
+        unit = u or unit
+        fixed.append((v, unit))
+    fixed.reverse()
+
+    def months(v, u):
+        u = (u or "m")[0]
+        return v / 30.0 if u == "d" else (v * 12.0 if u == "y" else v)
+
+    vals = [months(v, u) for v, u in fixed]
+    if re.search(r"above|more than|over|greater|exceed|>|\+", s) and not re.search(r"less|under|below|<", s):
+        return float("inf")
+    return max(vals)
+
+
+def _bucket_columns(buckets, sheet_cols, total_letter):
+    """bucket label -> column letter, the header of each column, and a note when the two cannot be paired safely."""
+    skip = re.compile(r"without|no maturity|undefined|unspecified|blank|not specified", re.I)
+    cols = [(L, h) for L, h in sheet_cols if L != total_letter]
+    open_cols = [(L, h) for L, h in cols if skip.search(h)]
+    cols = [(L, h) for L, h in cols if not skip.search(h)]
+    real = [b for b in buckets if b not in ("(blank)", "")]
+    big = 1e9
+    num = lambda v: big if v == float("inf") else v
+    pair = {}
+    hi_cols = [(L, _upper_bound_months(h)) for L, h in cols]
+    if all(x[1] is not None for x in hi_cols):
+        for b in real:
+            hb = _upper_bound_months(b)
+            if hb is None:
+                continue
+            best = None
+            for L, hc in hi_cols:
+                close = (hb == hc) or (hb != float("inf") and hc != float("inf") and abs(hb - hc) <= max(0.35, 0.12 * hc))
+                if close and (best is None or abs(num(hb) - num(hc)) < best[0]):
+                    best = (abs(num(hb) - num(hc)), L)
+            if best:
+                pair[b] = best[1]
+    if len(pair) != len(real) or len(set(pair.values())) != len(real):
+        pair = dict(zip(real, [L for L, _ in cols])) if len(real) == len(cols) else {}      # fall back to left-to-right order
+    note = None
+    if len(pair) != len(real):
+        note = ("The maturity buckets of the Outstanding Report (%s) could not be paired with the maturity columns of the sheet (%s), "
+                "so only the maturity total is checked." % (", ".join(real), ", ".join(h for _, h in cols)))
+        pair = {}
+    if "(blank)" in buckets and open_cols:
+        pair["(blank)"] = open_cols[0][0]
+    return pair, dict(cols + open_cols), note
+
+
+def ob_templates(res, sub, notes):
+    """Concrete rules for the off-balance sheets, from the processed Outstanding Report `res`.
+    Returns (rules, pivots for the workbook)."""
+    names = _ob_sheet_names(sub)
+    if not any(names.values()):
+        return [], None
+    if res is None:
+        notes.append("Off-balance sheets were extracted but no Outstanding Report is loaded, so the off-balance checks were skipped "
+                     "(upload it in the Off-Balance step, then press Re-run).")
+        return [], None
+    try:
+        from .outstanding_report import order_pivot_columns, BLANK, GRAND
+    except Exception:
+        notes.append("The off-balance checks need the latest outstanding_report.py in the library.")
+        return [], None
+    df = res["df"]
+    d = df[df["_STATUS"] == "ok"].copy()
+    for c in ("CATEGORY", "LC_GTEE_DESC", "BILL_CCY", "BUCKET"):
+        d[c] = d[c].fillna(BLANK)
+    sel = res.get("selected_category")
+    d2 = d if sel in (None, "", "All") else d[d["CATEGORY"] == sel]            # Pivot 2 carries the CATEGORY filter
+    p2cols = list(res["pivot2"]["flat"]["columns"])
+    p1cols = list(res["pivot1"]["flat"]["columns"])
+    ccys = [c for c in p2cols if c != GRAND]
+    total_name = "Total Off-Balance Sheet Accounts"
+    items = [("total", total_name)]
+    items += [("category", c) for c in order_pivot_columns(list(d["CATEGORY"].unique()), "currency") if c != BLANK]
+    items += [("lc", x) for x in order_pivot_columns(list(d["LC_GTEE_DESC"].unique()), "currency") if x != BLANK]
+
+    def rows_of(src, kind, name):
+        if kind == "category":
+            return src[src["CATEGORY"] == name]
+        if kind == "lc":
+            return src[src["LC_GTEE_DESC"] == name]
+        return src
+
+    out = []
+
+    def rule(label, ccy, kind, name, amount, sheet, ccy_sub, pivot, cols, letter=None):
+        mark = None if (kind == "category" and pivot == 2) else ["ob", pivot, kind, name, list(cols)]
+        shown = "Total" if kind == "total" else name
+        side = {"match_text": name, "sheet": sheet, "currency": ccy_sub, "is_total": False, "sign": 1}
+        if letter:
+            side["column_letter"] = letter
+        out.append({"label": "Off-balance %s - %s" % (shown, label), "currency": ccy, "rule_type": "GROUP_RULE",
+                    "_expanded": True, "derived": True, "ob": True,
+                    "tb_side": [{"level": "external", "label": "%s | %s" % ("Grand Total" if kind == "total" else name, label),
+                                 "amount": amount, "currency": ccy, "source": OB_SOURCE, "mark": mark}],
+                    "submission_side": [side]})
+
+    # ---- main sheet and the by-currency sheet (Pivot 2)
+    direct, has_iqd_col, other_col = [], False, False
+    if names["foreign"]:
+        sc = set(sub[sub.sheet == names["foreign"]].currency)
+        has_iqd_col = "IQD" in sc
+        direct = [c for c in sorted(sc) if c not in ("TOTAL", "IQD", FRX_CODE, "UNSPECIFIED") and not str(c).startswith("TOTAL_")]
+        other_col = FRX_CODE in sc
+    for kind, name in items:
+        rows = rows_of(d if kind in ("total", "category") else d2, kind, name)
+        iq = float(rows[rows["BILL_CCY"] == LOCAL_CCY]["EQUI_IQD"].sum())
+        fx = float(rows[rows["BILL_CCY"] != LOCAL_CCY]["EQUI_IQD"].sum())
+        tt = float(rows["EQUI_IQD"].sum())
+        if names["main"]:
+            rule("IQD (column 3 or 4)", "IQD", kind, name, iq, names["main"], "IQD", 2, [LOCAL_CCY])
+            rule("foreign currencies (column 5 or 6)", FRX_CODE, kind, name, fx, names["main"], FRX_CODE, 2,
+                 [c for c in ccys if c != LOCAL_CCY])
+            rule("total (column 2)", "TOTAL", kind, name, tt, names["main"], "TOTAL", 2, [GRAND])
+        if names["foreign"]:
+            if has_iqd_col:
+                rule("by currency - IQD", "IQD", kind, name, iq, names["foreign"], "IQD", 2, [LOCAL_CCY])
+            for c in direct:
+                rule("by currency - %s" % c, c, kind, name, float(rows[rows["BILL_CCY"] == c]["EQUI_IQD"].sum()),
+                     names["foreign"], c, 2, [c])
+            if other_col:
+                rest = rows[(rows["BILL_CCY"] != LOCAL_CCY) & (~rows["BILL_CCY"].isin(direct))]
+                rule("by currency - Other Foreign Currencies", FRX_CODE, kind, name, float(rest["EQUI_IQD"].sum()), names["foreign"],
+                     FRX_CODE, 2, [c for c in ccys if c != LOCAL_CCY and c not in direct])
+
+    # ---- maturity sheet (Pivot 1, Bucket columns)
+    if names["maturity"]:
+        cols = _sheet_columns(sub, names["maturity"])
+        total_letter = next((L for L, h in cols if "total" in h.lower()), cols[0][0] if cols else None)
+        buckets = [b for b in p1cols if b != GRAND]
+        pair, header_of, note = _bucket_columns(buckets, cols, total_letter)
+        if note:
+            notes.append(note)
+        for kind, name in items:
+            rows = rows_of(d, kind, name)
+            if total_letter:
+                rule("maturity total", "TOTAL", kind, name, float(rows["EQUI_IQD"].sum()), names["maturity"], None, 1, [GRAND], total_letter)
+            for b, L in pair.items():
+                rule("bucket %s (column %s, %s)" % (b, L, header_of.get(L, "")), "TOTAL", kind, name,
+                     float(rows[rows["BUCKET"] == b]["EQUI_IQD"].sum()), names["maturity"], None, 1, [b], L)
+    return out, {"pivot1": res["pivot1"]["flat"], "pivot2": res["pivot2"]["flat"]}
+
+
 # ------------------------------------------------------------------------------------------ the run
 
 def _cells_text(components):
@@ -262,10 +457,13 @@ def _cells_text(components):
     return "; ".join("%s!%s" % (sh, "+".join(cells)) for (f, sh), cells in by.items())
 
 
-def run_default_mapping(eng, tb, sub, templates=None):
+def run_default_mapping(eng, tb, sub, templates=None, outstanding=None):
     templates = templates if templates is not None else eng.load_default_mapping()
     skipped = []
     concrete = expand_templates(templates, tb, sub, skipped)
+    ob_notes = []
+    ob_rules, ob_pivots = ob_templates(outstanding, sub, ob_notes)
+    concrete = list(concrete) + ob_rules
     scale_of = {}
     if sub is not None and len(sub):
         for r in sub[["submission_file", "sheet", "source_cell", "scale"]].itertuples(index=False):
@@ -307,7 +505,7 @@ def run_default_mapping(eng, tb, sub, templates=None):
             "files": sorted(set(c["submission_file"] for c in sbc)),
             "target_sheets": sorted(set(x.get("sheet") for x in t.get("submission_side", []) if x.get("sheet"))),
             "where": _cells_text(sbc), "tb_components": tbc, "components": sbc, "warnings": notes,
-            "tb_marks": resolved.get("tb_marks", []), "expanded": bool(t.get("_expanded")), "derived": bool(t.get("derived")), "resolved": resolved,
+            "tb_marks": resolved.get("tb_marks", []), "expanded": bool(t.get("_expanded")), "derived": bool(t.get("derived")), "ob": bool(t.get("ob")), "resolved": resolved,
             "wildcard": any(str(x.get("bs_mapping") or "").endswith("*") for x in (t.get("tb_side") or []) if x.get("level") == "group"),
             "n_tb": sum(1 for c in tbc if not c.get("placeholder")), "n_sub": sum(1 for c in sbc if not c.get("placeholder")),
             "color": ""})
@@ -316,8 +514,8 @@ def run_default_mapping(eng, tb, sub, templates=None):
         if r["n_sub"]:
             r["color"] = PALETTE[palette_i % len(PALETTE)]
             palette_i += 1
-    notes = ["The sheet '%s' was not extracted, so the checks that read it were skipped." % x[1] for x in skipped]
-    return {"results": results, "summary": summarise(results), "groups": group_coverage(tb, results), "notes": notes,
+    notes = ["The sheet '%s' was not extracted, so the checks that read it were skipped." % x[1] for x in skipped] + ob_notes
+    return {"results": results, "summary": summarise(results), "groups": group_coverage(tb, results), "notes": notes, "ob_pivots": ob_pivots,
             "params": {"tol_abs": eng.tolerance_abs, "tol_pct": eng.tolerance_pct}}
 
 
@@ -430,6 +628,7 @@ def write_default_workbook(path_in, path_out, label, tb, run):
                     wa.cell(row=row_i, column=4 + keys.index(mk[4])).fill = _fill(r["color"])
     wp.freeze_panes = "C2"
     wa.freeze_panes = "D2"
+    _write_ob_pivots(wb, run, mine, bold, grey)
     wp.column_dimensions["B"].width = 36
     wa.column_dimensions["A"].width = 18
     wa.column_dimensions["C"].width = 38
@@ -520,6 +719,46 @@ def write_default_workbook(path_in, path_out, label, tb, run):
         sh.sheet_view.tabSelected = sh.title == wr.title
     wb.save(path_out)
     return path_out
+
+
+def _write_ob_pivots(wb, run, mine, bold, grey):
+    """OB Pivot 1 / OB Pivot 2 (the Outstanding Report) with the cells the off-balance rules used coloured."""
+    pv = run.get("ob_pivots")
+    if not pv or not any(m[0] == "ob" for r in mine for m in r["tb_marks"]):
+        return
+    sheets = {}
+    for n in (1, 2):
+        flat = pv["pivot%d" % n]
+        ws = wb.create_sheet(_unique_name(wb, "OB Pivot %d" % n))
+        nl = len(flat["label_cols"])
+        ws.append(list(flat["label_cols"]) + list(flat["columns"]))
+        for c in ws[1]:
+            c.font, c.fill = bold, grey
+        for r in flat["rows"]:
+            ws.append(list(r["labels"]) + list(r["values"]) + [r["total"]])
+            for col in range(nl + 1, nl + 2 + len(r["values"])):
+                ws.cell(row=ws.max_row, column=col).number_format = "#,##0.00;[Red]-#,##0.00"
+        ws.freeze_panes = ws.cell(row=2, column=nl + 1)
+        ws.column_dimensions["A"].width = 26
+        sheets[n] = (ws, flat, nl)
+    for r in mine:
+        if not r["color"]:
+            continue
+        for mk in r["tb_marks"]:
+            if mk[0] != "ob":
+                continue
+            _, n, kind, name, colnames = mk
+            ws, flat, nl = sheets[n]
+            for i, row in enumerate(flat["rows"]):
+                lv, lab = row["level"], row["labels"]
+                hit = (kind == "total" and lv == "Grand Total") or \
+                      (kind == "category" and n == 1 and lv == "Category" and lab[0] == name) or \
+                      (kind == "lc" and lv == "LC/GTEE" and (lab[1] if n == 1 else lab[0]) == name)
+                if not hit:
+                    continue
+                for cn in colnames:
+                    if cn in flat["columns"]:
+                        ws.cell(row=i + 2, column=nl + 1 + flat["columns"].index(cn)).fill = _fill(r["color"])
 
 
 def build_zip(entries):

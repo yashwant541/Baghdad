@@ -156,6 +156,15 @@ def text_similarity(a, b):
     jaccard = len(ta & tb) / len(ta | tb) if (ta | tb) else 0.0
     return max(jaccard, seq)
 
+# a maturity-bucket column ('Less than one Month', 'Between Three and Six Months', 'More than five years', '0-30 Days', '1-5Y',
+# 'Without Maturity'): its cells are read as currency BUCKET so a rule can name one bucket column
+BUCKET_HEADER_PATTERN = re.compile(
+    r"\b(less\s+than|between|more\s+than|above|over|up\s*to|within)\b.*\b(day|week|month|year)s?\b"
+    r"|\b(without|no)\s+maturity\b"
+    r"|\b\d+\s*(?:-|to)\s*\d+\s*(?:days?|months?|years?|d|m|y|yrs?)\b"
+    r"|\b\d+\s*(?:days?|months?|years?|yrs?)\b"
+    r"|^\s*\d+\s*[mMyYdD]\s*$", re.I)
+
 def classify_currency_header(text):
     t = str(text or "").strip()
     if not t:
@@ -176,6 +185,8 @@ def classify_currency_header(text):
         return f"TOTAL_{code}"
     if is_total:
         return "TOTAL"
+    if not code and BUCKET_HEADER_PATTERN.search(t):
+        return "BUCKET"
     return code
 
 def split_hierarchy(text):
@@ -750,6 +761,14 @@ class ReconEngine:
         tb_marks=[]
         seen_group_rows=set()
         for item in template.get('tb_side',[]) or []:
+            if item.get('level')=='external':
+                # a value that does not come from the Trial Balance (e.g. an Outstanding Report pivot cell): it is
+                # carried as a ready-made component, with an optional mark for colouring the pivot it came from
+                tb_components.append({'account':item.get('label'),'account_desc':item.get('label'),
+                                      'bs_mapping':item.get('source') or 'External','currency':item.get('currency') or 'TOTAL',
+                                      'amount':float(item.get('amount') or 0.0),'sign':item.get('sign',1),'external':True})
+                if item.get('mark'): tb_marks.append(item['mark'])
+                continue
             if item.get('level')=='group':
                 gcomps,gwarn,gmarks=self._resolve_group_item(item,tb)
                 for c in gcomps:
@@ -852,10 +871,20 @@ class ReconEngine:
                     # line on some other, unrelated sheet.
                     warnings.append(f"Submission item not found: sheet {sheet!r} was not included in this extraction — {text!r}")
                     continue
-            cell_mode=bool(col_ctx) or item.get('aggregate')=='cell'          # legacy / explicit: one specific cell
+            letter=item.get('column_letter')
+            if letter and len(pool):                                           # one named column of the sheet (e.g. a maturity bucket)
+                pl=pool[pool.source_cell.astype(str).str.match(r'^%s\d+$'%re.escape(str(letter).upper()))]
+                if len(pl): pool=pl
+                else:
+                    warnings.append(f"Submission item not found: column {letter} of {sheet!r} holds no value in a row like {text!r}")
+                    continue
+            cell_mode=bool(col_ctx) or bool(letter) or item.get('aggregate')=='cell'   # legacy / explicit: one specific cell
             # does this sheet identify its currency columns at all? If so, a row with nothing in the item's currency
             # is a real zero; only a sheet whose columns carry no currency (UNSPECIFIED) falls back to every cell
-            sheet_has_ccy=bool(ccy) and len(pool)>0 and bool((pool.currency!='UNSPECIFIED').any())
+            # a sheet whose columns are all TOTAL / UNSPECIFIED (headers not recognised as IQD or a foreign currency) cannot
+            # say which column is IQD: for an IQD / foreign item every cell of the row is then a candidate instead of reading zero
+            sheet_has_ccy=bool(ccy) and len(pool)>0 and (ccy=='TOTAL' and bool((pool.currency=='TOTAL').any()) or
+                                                         bool((~pool.currency.isin(['UNSPECIFIED','TOTAL'])).any()))
             if cell_mode and ccy and len(pool):
                 p2=pool[pool.currency==ccy]
                 if len(p2): pool=p2
@@ -896,10 +925,11 @@ class ReconEngine:
             # the amount decides below.
             cands=[(sc,idxs) for sc,idxs in scored if sc>=best_score-0.05][:12]
             n_units=len(cands)
-            if (not cell_mode) and ccy and sheet_has_ccy and item.get('aggregate')!='sum':
+            if (not cell_mode) and ccy and item.get('aggregate')!='sum':
                 exp=[]
                 for sc,idxs in cands:
-                    same=[i for i in idxs if submissions.loc[i,'currency']==ccy]
+                    # a sheet whose columns carry no currency at all: every cell of the row is a candidate (never their sum)
+                    same=[i for i in idxs if (submissions.loc[i,'currency']==ccy or not sheet_has_ccy)]
                     if len(same)>1: exp.extend((sc,[i]) for i in same)
                     else: exp.append((sc,idxs))
                 cands=exp

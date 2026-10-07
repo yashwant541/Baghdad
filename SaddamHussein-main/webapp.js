@@ -409,6 +409,8 @@ function renderDefault(){
     return `<div class="depthCard"><div class="depthCardHead"><div><b>${esc(f.file)}</b> <span class="chip">${esc((DEPTH_TYPES.find(t=>t[0]===state.fileTypes[f.file])||[0,''])[1])}</span></div>
       <button type="button" class="primary" data-action="dm-download" data-file="${esc(f.file)}">Download annotated workbook</button></div>
       <div>${dmChips(sm)}${sm.REVIEW_REQUIRED||sm.MATCH_WITHIN_TOLERANCE?`<span class="chip">${esc('Total absolute variance '+fmt(sm.abs))}</span>`:''}</div>
+      <div class="muted" style="margin-top:6px"><span>${esc('Sheets read from this file:')}</span> <span data-tr="1">${esc(((j.files.find(x=>x.file===f.file)||{}).sheets_read||[]).join(' · ')||'(none)')}</span></div>
+      ${sm.MATCH+sm.MATCH_WITHIN_TOLERANCE+sm.REVIEW_REQUIRED===0?`<div class="notice" style="margin:10px 0 0">${esc('No rule found a cell in this file. Check that its sheets were selected when extracting and that their row labels match the mapping.')}</div>`:''}
       ${body?`<div class="depthScroll"><table class="dmTable">${head}<tbody>${body}</tbody></table></div>`:empty}</div>`;
   }).join('');
   const shown=new Set(); state.subFilesMeta.forEach(f=>dmRulesFor(f.file,all).forEach(r=>shown.add(r.n)));
@@ -1615,7 +1617,10 @@ const AR_DICT={
 "BS mapping group": "مجموعة ربط الميزانية",
 "Foreign currencies": "العملات الأجنبية",
 "Rules that read it": "القواعد التي تقرأها",
-"NO RULE": "لا توجد قاعدة"
+"NO RULE": "لا توجد قاعدة",
+"Sheets read from this file:": "الأوراق المقروءة من هذا الملف:",
+"No rule found a cell in this file. Check that its sheets were selected when extracting and that their row labels match the mapping.": "لم تجد أي قاعدة خلية في هذا الملف. تحقق من تحديد أوراقه عند الاستخراج ومن تطابق تسميات صفوفها مع الربط.",
+"Off-balance sheets were extracted but no Outstanding Report is loaded, so the off-balance checks were skipped (upload it in the Off-Balance step, then press Re-run).": "تم استخراج أوراق خارج الميزانية لكن لم يُحمَّل تقرير الأرصدة القائمة، لذلك تم تخطي فحوصات خارج الميزانية (ارفعه في خطوة خارج الميزانية ثم اضغط إعادة التشغيل)."
 };
 const AR_RULES=[
 [

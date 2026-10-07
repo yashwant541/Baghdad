@@ -211,9 +211,10 @@ def _run_default(d,eng):
             coverage.append(e)
         return matches,coverage,{'ok':False,'error':'The default-mapping report needs the latest bahrain_iraq_algorithm library '
                                  '(copy default_report.py, pdf_simple.py and engine.py into it, then restart the backend). Detail: %s'%DR_ERROR}
-    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'])
+    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'))
     d['default_run']=run
     for r in run['results']:
+        if r.get('ob'): continue                 # off-balance checks live on the Default Mapping page, not in Mapping Studio
         resolved=_strip_placeholders(r['resolved'])
         ok=r['n_tb']>0 and r['n_sub']>0
         e={'label':r['label'],'currency':r['currency'],'rule_type':r['rule_type'],'fulfilled':ok,'tb_found':r['n_tb']>0,
@@ -230,7 +231,9 @@ def _default_payload(d,run):
     for entry in d['sub_files']:
         sheets=[s['sheet'] for s in d['sub_inspect'].get(entry['label'],[])]
         mine=DR._results_for_file(run['results'],entry['label'],sheets)
-        files.append({'file':entry['label'],'summary':DR.summarise(mine),'rules':[r['n'] for r in mine]})
+        sub=d.get('sub_df')
+        read=sorted(set(sub[sub.submission_file==entry['label']].sheet)) if (sub is not None and len(sub)) else []
+        files.append({'file':entry['label'],'summary':DR.summarise(mine),'rules':[r['n'] for r in mine],'sheets_read':read})
     return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files,'groups':run.get('groups',[]),'notes':run.get('notes',[])}
 
 def _dm_unavailable():
@@ -250,7 +253,7 @@ def default_run():
     bad=_dm_ready(d)
     if bad: return bad
     eng=ReconEngine(float(body.get('tolerance_abs',1)),float(body.get('tolerance_pct',0.0001)))
-    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'])
+    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'))
     d['default_run']=run
     return jsonify(_default_payload(d,run))
 
