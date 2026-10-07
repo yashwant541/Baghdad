@@ -2277,6 +2277,84 @@
     "A-*"
    ],
    "row": "Total Assets"
+  },
+  {
+   "label": "L-CASA Deposits Entities Other",
+   "currency": "TOTAL",
+   "rule_type": "LIABILITY_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "L-CASA"
+   ],
+   "row": "Deposits Entities Other ( First + Second ) Tables Number 18 And19",
+   "sign": -1
+  },
+  {
+   "label": "L-IGL-C + L-IGL-F Deposits Banks",
+   "currency": "TOTAL",
+   "rule_type": "LIABILITY_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "L-IGL-C",
+    "L-IGL-F"
+   ],
+   "row": "Deposits Banks (First + Second) Schedule / Table Number 17",
+   "sign": -1
+  },
+  {
+   "label": "L-OL Liabilities Other",
+   "currency": "TOTAL",
+   "rule_type": "LIABILITY_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "L-OL"
+   ],
+   "row": "Liabilities Other ( Considered Statement Accordingly )",
+   "sign": -1
+  },
+  {
+   "label": "L-PR Allocations / Provisions Various",
+   "currency": "TOTAL",
+   "rule_type": "LIABILITY_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "L-PR"
+   ],
+   "row": "Allocations / Provisions Various ( Considered Statement Accordingly )",
+   "sign": -1
+  },
+  {
+   "label": "L-PL Profits And Losses During Period",
+   "currency": "TOTAL",
+   "rule_type": "LIABILITY_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "L-PL"
+   ],
+   "row": "Profits And Losses During Period",
+   "sign": -1
+  },
+  {
+   "label": "L-CAPITAL Head / Capital",
+   "currency": "TOTAL",
+   "rule_type": "LIABILITY_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "L-CAPITAL"
+   ],
+   "row": "Head / Capital Capital Subscriber Thereof",
+   "sign": -1
+  },
+  {
+   "label": "All Liabilities (L-*) Total Liabilities",
+   "currency": "TOTAL",
+   "rule_type": "LIABILITY_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "L-*"
+   ],
+   "row": "Total Liabilities",
+   "sign": -1
   }
  ]
 }

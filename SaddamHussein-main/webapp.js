@@ -419,6 +419,7 @@ function renderDefault(){
       ${body?`<div class="depthScroll"><table class="dmTable">${head}<tbody>${body}</tbody></table></div>`:empty}</div>`;
   }
   box.innerHTML=out||'<div class="muted">No rules to show.</div>';
+  $('dmNotes').innerHTML=(j.notes||[]).map(n=>`<div class="notice">${esc(n)}</div>`).join('');
   const gs=j.groups||[], open_=gs.filter(g=>!g.covered&&Math.abs(g.total)>1e-6);
   $('dmGroups').innerHTML=gs.length?`<details class="depthCard" ${open_.length?'open':''}><summary><b>Trial Balance groups and the rules that read them</b> <span class="chip">${esc(gs.length-open_.length+' of '+gs.length+' groups covered')}</span>${open_.length?`<span class="chip">${esc(open_.length+' group(s) with no rule')}</span>`:''}</summary>
     <div class="depthScroll"><table class="dmTable" style="min-width:600px"><thead><tr><th>BS mapping group</th><th>IQD</th><th>Foreign currencies</th><th>Total</th><th>Rules that read it</th></tr></thead><tbody>${gs.map(g=>`<tr class="${g.covered?'':'dmReview'}"><td><b>${esc(g.group)}</b></td><td class="num">${esc(fmt(g.iqd))}</td><td class="num">${esc(fmt(g.frx))}</td><td class="num">${esc(fmt(g.total))}</td><td>${g.covered?esc(g.rules.map(n=>'#'+n).join(', ')):'<span class="pill NOT_FOUND">NO RULE</span>'}</td></tr>`).join('')}</tbody></table></div></details>`:'';
@@ -1944,6 +1945,10 @@ const AR_RULES=[
 [
 "^(\\d+) group\\(s\\) with no rule$",
 "{1} مجموعة بلا قاعدة"
+],
+[
+"^The sheet '(.+)' was not extracted, so the checks that read it were skipped\\.$",
+"لم تُستخرج الورقة '{1}'، لذلك تم تخطي الفحوصات التي تقرأها."
 ]
 ].map(([src,tpl])=>[new RegExp(src),tpl]);
 const I18N_ATTRS=['placeholder','title','aria-label'];

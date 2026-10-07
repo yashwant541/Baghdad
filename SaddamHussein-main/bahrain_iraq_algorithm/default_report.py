@@ -138,37 +138,70 @@ def _fc_expand(t, sub):
     return out
 
 
-def _asset_group(t):
-    """ASSET_GROUP template (the logic of 'Iraq Changes.docx'): for the row of one BS-mapping group (or groups)
-    - Assets sheet, IQD column 3 or 4 = TB group, IQD only (the subtotal is in ONE of them, not their sum)
-    - Assets sheet, foreign column 5 or 6 = TB group, every non-IQD currency
-    - Assets sheet, total column (2)   = TB group, all currencies
-    - Assets by Foreign Currency       = TB group currency by currency; the rest against 'Other Foreign Currencies'
-    - Assets by Maturity, total column = TB group, all currencies
+_KINDS = {"ASSET_GROUP": "Assets", "LIABILITY_GROUP": "Liabilities"}
+
+
+def _sheet_names(kind, sub, override=None):
+    """Names of the main / foreign-currency / maturity sheet of a statement ('Assets' or 'Liabilities'), read from the
+    extracted sheets when they can be told apart, else the CBI default names."""
+    names = {"main": kind, "foreign": kind + " by Foreign Currency", "maturity": kind + " by Maturity"}
+    have = sorted(set(sub.sheet)) if (sub is not None and len(sub)) else []
+    k = kind.lower()
+    for sh in have:
+        low = str(sh).lower().strip()
+        if not low.startswith(k):
+            continue
+        if "matur" in low:
+            names["maturity"] = sh
+        elif "foreign" in low or "currenc" in low:
+            names["foreign"] = sh
+        elif low == k:
+            names["main"] = sh
+    names.update(override or {})
+    return names, set(have)
+
+
+def _asset_group(t, sub=None, notes=None):
+    """ASSET_GROUP / LIABILITY_GROUP template (the logic of 'Iraq Changes.docx'; the same for both statements): for the
+    row of one BS-mapping group (or groups)
+    - main sheet, IQD column 3 or 4 = TB group, IQD only (the subtotal is in ONE of them, not their sum)
+    - main sheet, foreign column 5 or 6 = TB group, every non-IQD currency
+    - main sheet, total column 2   = TB group, all currencies
+    - '<kind> by Foreign Currency'  = TB group currency by currency; the rest against 'Other Foreign Currencies'
+    - '<kind> by Maturity', total column = TB group, all currencies
     Fields: label, tb_groups, row (text of the row; row_foreign / row_maturity override it per sheet), include (subset of
-    IQD, FRX, TOTAL, FC, MATURITY), sheets (names of the three sheets, if they differ)."""
+    IQD, FRX, TOTAL, FC, MATURITY), sign (-1 for liabilities, whose TB balances are negative), sheets (override names).
+    A foreign-currency / maturity sheet that was not extracted is skipped and mentioned in notes."""
+    kind = _KINDS.get(t.get("rule_type"), "Assets")
     groups = t.get("tb_groups") or []
-    names = {"assets": "Assets", "foreign": "Assets by Foreign Currency", "maturity": "Assets by Maturity"}
-    names.update(t.get("sheets") or {})
+    names, have = _sheet_names(kind, sub, t.get("sheets"))
     inc = set(t.get("include") or ["IQD", "FRX", "TOTAL", "FC", "MATURITY"])
-    sign = t.get("sign", 1)
+    sign = t.get("sign", -1 if kind == "Liabilities" else 1)
     text = t.get("row") or t.get("label")
 
-    def sub(sheet, txt, ccy):
+    def side(sheet, txt, ccy):
         return [{"match_text": txt, "sheet": sheet, "currency": ccy, "is_total": False, "sign": sign}]
 
     out = []
-    for ccy, what in (("IQD", "IQD (Assets column 3 or 4)"), ("FRX", "foreign currencies (Assets column 5 or 6)"), ("TOTAL", "total (Assets column 2)")):
+    for ccy, what in (("IQD", "IQD (%s column 3 or 4)" % kind), ("FRX", "foreign currencies (%s column 5 or 6)" % kind),
+                      ("TOTAL", "total (%s column 2)" % kind)):
         if ccy in inc:
             out.append({"label": "%s - %s" % (t["label"], what), "currency": ccy, "rule_type": "GROUP_RULE", "_expanded": True, "derived": True,
-                        "tb_side": [grp(g, ccy) for g in groups], "submission_side": sub(names["assets"], text, ccy)})
-    if "FC" in inc:
-        out.append({"label": "%s - by currency" % t["label"], "currency": "FC", "rule_type": "FC_COLUMNS", "derived": True,
-                    "tb_groups": list(groups), "submission_side": sub(names["foreign"], t.get("row_foreign") or text, "TOTAL")})
-    if "MATURITY" in inc:
-        out.append({"label": "%s - total (Assets by Maturity)" % t["label"], "currency": "TOTAL", "rule_type": "GROUP_RULE",
-                    "_expanded": True, "derived": True, "tb_side": [grp(g, "TOTAL") for g in groups],
-                    "submission_side": sub(names["maturity"], t.get("row_maturity") or text, "TOTAL")})
+                        "tb_side": [grp(g, ccy) for g in groups], "submission_side": side(names["main"], text, ccy)})
+    for key, label, kindname in (("FC", "by currency", "foreign"), ("MATURITY", "total (%s by Maturity)" % kind, "maturity")):
+        if key not in inc:
+            continue
+        if have and names[kindname] not in have:
+            if notes is not None and ("sheet", names[kindname]) not in notes:
+                notes.append(("sheet", names[kindname]))
+            continue
+        if key == "FC":
+            out.append({"label": "%s - %s" % (t["label"], label), "currency": "FC", "rule_type": "FC_COLUMNS", "derived": True,
+                        "tb_groups": list(groups), "submission_side": side(names["foreign"], t.get("row_foreign") or text, "TOTAL")})
+        else:
+            out.append({"label": "%s - %s" % (t["label"], label), "currency": "TOTAL", "rule_type": "GROUP_RULE", "_expanded": True,
+                        "derived": True, "tb_side": [grp(g, "TOTAL") for g in groups],
+                        "submission_side": side(names["maturity"], t.get("row_maturity") or text, "TOTAL")})
     return out
 
 
@@ -186,13 +219,13 @@ def _rule_key(t):
     return (tuple(sorted(tb)), subs)
 
 
-def expand_templates(templates, tb, sub):
+def expand_templates(templates, tb, sub, notes=None):
     """Concrete templates. ASSET_GROUP and FC_COLUMNS templates expand from the target sheets' own currency columns;
     a derived (ASSET_GROUP) rule that an explicit rule already covers is dropped, so nothing is counted twice."""
     staged = []
     for t in templates:
-        if t.get("rule_type") == "ASSET_GROUP":
-            staged.extend(_asset_group(t))
+        if t.get("rule_type") in _KINDS:
+            staged.extend(_asset_group(t, sub, notes))
         else:
             staged.append(t)
     out = []
@@ -231,7 +264,8 @@ def _cells_text(components):
 
 def run_default_mapping(eng, tb, sub, templates=None):
     templates = templates if templates is not None else eng.load_default_mapping()
-    concrete = expand_templates(templates, tb, sub)
+    skipped = []
+    concrete = expand_templates(templates, tb, sub, skipped)
     scale_of = {}
     if sub is not None and len(sub):
         for r in sub[["submission_file", "sheet", "source_cell", "scale"]].itertuples(index=False):
@@ -282,7 +316,8 @@ def run_default_mapping(eng, tb, sub, templates=None):
         if r["n_sub"]:
             r["color"] = PALETTE[palette_i % len(PALETTE)]
             palette_i += 1
-    return {"results": results, "summary": summarise(results), "groups": group_coverage(tb, results),
+    notes = ["The sheet '%s' was not extracted, so the checks that read it were skipped." % x[1] for x in skipped]
+    return {"results": results, "summary": summarise(results), "groups": group_coverage(tb, results), "notes": notes,
             "params": {"tol_abs": eng.tolerance_abs, "tol_pct": eng.tolerance_pct}}
 
 
