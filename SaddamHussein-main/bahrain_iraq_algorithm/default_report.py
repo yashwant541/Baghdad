@@ -368,8 +368,7 @@ def ob_templates(res, sub, notes):
     d = df[df["_STATUS"] == "ok"].copy()
     for c in ("CATEGORY", "LC_GTEE_DESC", "BILL_CCY", "BUCKET"):
         d[c] = d[c].fillna(BLANK)
-    sel = res.get("selected_category")
-    d2 = d if sel in (None, "", "All") else d[d["CATEGORY"] == sel]            # Pivot 1 carries the optional CATEGORY filter
+    d2 = d                                                                     # Pivot 1 has no CATEGORY and no filter
     p2cols = list(res["pivot1"]["flat"]["columns"])                            # currency columns (Pivot 1)
     p1cols = list(res["pivot2"]["flat"]["columns"])                            # bucket columns (Pivot 2)
     ccys = [c for c in p2cols if c != GRAND]

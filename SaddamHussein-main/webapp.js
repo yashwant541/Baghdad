@@ -214,11 +214,6 @@ async function uploadOutstanding(){
   state.outstanding=j; state.depth=null; renderOutstanding(); renderDepthFiles(); renderDepthResults();
   setStatus('Outstanding Report ready');
 }
-async function changeObCategory(value){
-  const j=await api('/api/outstanding/category',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({session_id:state.session,category:value})});
-  state.outstanding=j; state.depth=null; renderOutstanding(); renderDepthFiles(); renderDepthResults();
-}
 function obCell(v){
   if(typeof v!=='number') return esc(v);
   if(Math.abs(v)<0.005) return '-';
@@ -247,8 +242,6 @@ function renderOutstanding(){
     ['Pivot total',val['Source Equ-IQD total (valid rows)']],['Excel SUM of the raw column',val['Excel-style total of the raw Equ-IQD column (numeric cells only)']],
     ['Pivot - Excel SUM',val['Difference: pivot total - Excel-style total of the raw column']]]
     .map(([k,v])=>`<div class="kpi"><small>${esc(k)}</small><b>${esc(fmt(v))}</b></div>`).join('');
-  const sel=$('obCategory');
-  sel.innerHTML=['<option value="">All</option>'].concat((j.categories||[]).map(c=>`<option value="${esc(c)}" ${c===j.selected_category?'selected':''}>${esc(c)}</option>`)).join('');
   renderObTable('obPivot1',j.pivot1); renderObTable('obPivot2',j.pivot2);
   $('obValidation').innerHTML='<thead><tr><th>Check</th><th>Value</th></tr></thead><tbody>'+(j.validation||[]).map(([k,v])=>`<tr><td data-tr="1">${esc(k)}</td><td>${esc(typeof v==='number'?fmt(v):v)}</td></tr>`).join('')+'</tbody>';
   $('obBody').style.display='block'; $('btnOutstandingDl').style.display='inline-flex';
@@ -461,7 +454,7 @@ function renderDepthFiles(){
     const hasOb=Object.values(state.fileTypes).some(t=>t==='offbalance');
     ex.className='notice'+(hasOb?' good':'');
     if(o) ex.innerHTML=hasOb
-      ? `Outstanding Report loaded (${esc(o.sheet)}): it is searched in the Off-balance (064) file only - its Pivot 2 (Bucket) on Maturity sheets, and Pivot 1 (CATEGORY: ${esc(o.selected_category||'All')}) on every sheet.`
+      ? `Outstanding Report loaded (${esc(o.sheet)}): it is searched in the Off-balance (064) file only - its Pivot 2 (Bucket) on Maturity sheets, and Pivot 1 on every sheet.`
       : `Outstanding Report loaded (${esc(o.sheet)}), but no file is typed Off-balance (064) - set the type of the Off-balance submission below, otherwise its pivots are not searched.`;
   }
   if(!state.subFilesMeta.length){ box.innerHTML='<div class="muted" style="padding:6px 2px">No submission files yet — upload them in the Submissions step.</div>'; return; }
@@ -1175,7 +1168,6 @@ document.addEventListener('change',e=>{
   }
   if(el.dataset.action==='work-lang'){ $('dictBox').style.display=el.value==='en'?'block':'none'; return; }
   if(el.id==='dictFile'){ $('dictName').textContent=el.files[0]?el.files[0].name:''; return; }
-  if(el.dataset.action==='ob-category'){ guarded(null,()=>changeObCategory(el.value)); return; }
   if(el.dataset.action==='set-file-type'){
     state.fileTypes[el.dataset.file]=el.value;
     renderDepthFiles();                       // refresh the Off-balance note above
@@ -1313,7 +1305,6 @@ const AR_DICT={
 "Rows: CATEGORY, LC/GTEE DESC, BILL_CCY · Columns: Bucket · Values: Sum of Equ-IQD": "الصفوف: CATEGORY وLC/GTEE DESC وBILL_CCY · الأعمدة: Bucket · القيم: مجموع Equ-IQD",
 "Filters: none · Columns: Bucket · Values: Sum of Equ-IQD": "المرشحات: لا يوجد · الأعمدة: الفترة · القيم: مجموع المكافئ بالدينار العراقي",
 "Pivot 1 · LC/GTEE by Currency": "الجدول المحوري 1 · LC/GTEE حسب العملة",
-"Filter: CATEGORY": "المرشح: الفئة",
 "Validation details": "تفاصيل التحقق",
 "All": "الكل",
 "Check": "الفحص",
@@ -1582,8 +1573,7 @@ const AR_DICT={
 "Repeated header rows removed": "صفوف العناوين المكررة المحذوفة",
 "Bucket labels that differ only by case/spacing": "تسميات الفترات التي تختلف في الحروف/المسافات فقط",
 "Sum of Equ-IQD by Bucket": "مجموع المكافئ بالدينار حسب الفترة",
-"Pivot 1 Grand Total (all categories)": "الإجمالي العام للجدول 1 (كل الفئات)",
-"Pivot 1 Grand Total (as selected)": "الإجمالي العام للجدول 1 (حسب الاختيار)",
+"Pivot 1 Grand Total": "الإجمالي العام للجدول 1",
 "Reconciliation difference (source - Pivot 1)": "فرق التسوية (المصدر - الجدول 1)",
 "Reconciliation difference (source - Pivot 2)": "فرق التسوية (المصدر - الجدول 2)",
 "· Sub-group match:": "· مطابقة المجموعة الفرعية:",
@@ -1918,8 +1908,8 @@ const AR_RULES=[
 "ملفات خارج الميزانية لا تُبحث بعد."
 ],
 [
-"^Outstanding Report loaded \\((.+)\\): it is searched in the Off-balance \\(064\\) file only - its Pivot 2 \\(Bucket\\) on Maturity sheets, and Pivot 1 \\(CATEGORY: (.+)\\) on every sheet\\.$",
-"تم تحميل تقرير الأرصدة القائمة ({1}): يُبحث عنه في ملف خارج الميزانية (064) فقط - الجدول المحوري 2 (الفترات) في أوراق الاستحقاق، والجدول المحوري 1 (الفئة: {2:t}) في كل ورقة."
+"^Outstanding Report loaded \\((.+)\\): it is searched in the Off-balance \\(064\\) file only - its Pivot 2 \\(Bucket\\) on Maturity sheets, and Pivot 1 on every sheet\\.$",
+"تم تحميل تقرير الأرصدة القائمة ({1}): يُبحث عنه في ملف خارج الميزانية (064) فقط - الجدول المحوري 2 (الفترات) في أوراق الاستحقاق، والجدول المحوري 1 في كل ورقة."
 ],
 [
 "^Outstanding Report loaded \\((.+)\\), but no file is typed Off-balance \\(064\\) - set the type of the Off-balance submission below, otherwise its pivots are not searched\\.$",

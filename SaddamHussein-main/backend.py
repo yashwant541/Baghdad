@@ -526,7 +526,7 @@ def _ob_payload(d):
         return {'title':f['title'],'label_cols':f['label_cols'],'columns':f['columns'],'category':f.get('category'),
                 'rows':[{'level':r['level'],'labels':r['labels'],'values':r['values'],'total':r['total']} for r in f['rows']]}
     return {'ok':True,'source':ob['name'],'sheet':res['info']['sheet'],'header_row':res['info']['header_row'],
-            'categories':res['categories'],'selected_category':res['selected_category'],'warnings':res['warnings'],
+            'warnings':res['warnings'],
             'validation':[[k,v if isinstance(v,(int,float)) else str(v)] for k,v in res['validation']],
             'pivot1':flat(res['pivot1']['flat']),'pivot2':flat(res['pivot2']['flat'])}
 
@@ -541,22 +541,10 @@ def outstanding_upload():
         if TR is None: return _tr_unavailable()
         path=TR.to_xlsx(path,d['dir'])
     try:
-        res=OR.process_outstanding(path,name,category=request.form.get('category') or None,sheet=request.form.get('sheet') or None)
+        res=OR.process_outstanding(path,name,sheet=request.form.get('sheet') or None)
     except OR.OutstandingError as exc:
         return jsonify({'ok':False,'error':str(exc)}),400
     d['outstanding']={'path':path,'name':name,'result':res}; d['depth']=None
-    return jsonify(_ob_payload(d))
-
-@app.route('/api/outstanding/category',methods=['POST','OPTIONS'])
-def outstanding_category():
-    if OR is None: return _ob_unavailable()
-    body=request.get_json(force=True,silent=True) or {}
-    sid,d=get_session(body.get('session_id'))
-    if not d.get('outstanding'):return jsonify({'ok':False,'error':'Upload the Outstanding Report first.'}),400
-    res=d['outstanding']['result']
-    try: p2=OR.build_lcgtee_currency_pivot(res['df'],body.get('category') or None)
-    except OR.OutstandingError as exc: return jsonify({'ok':False,'error':str(exc)}),400
-    res['pivot1']=p2; res['selected_category']=p2['flat']['category']; d['depth']=None
     return jsonify(_ob_payload(d))
 
 @app.route('/api/outstanding/download',methods=['GET'])

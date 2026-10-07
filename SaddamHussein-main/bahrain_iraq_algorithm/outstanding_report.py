@@ -1,6 +1,6 @@
 """Outstanding Report -> the two PivotTables of the Off-Balance specification, as code.
 
-  Pivot 1  rows: LC/GTEE DESC   columns: BILL_CCY   (optional CATEGORY filter)  values: Sum of Equ-IQD
+  Pivot 1  rows: LC/GTEE DESC   columns: BILL_CCY   (no CATEGORY, no filter)    values: Sum of Equ-IQD
   Pivot 2  rows: CATEGORY > LC/GTEE DESC > BILL_CCY      columns: Bucket        values: Sum of Equ-IQD
 
 The raw-data sheet and its header row are found dynamically (nothing is tied to a sheet name, a
@@ -66,7 +66,7 @@ def normalize_header(v):
 
 
 def normalize_group_value(v):
-    """The label exactly as it is written in the sheet; an empty cell is None (shown as (blank))."""
+    """The label exactly as it is written in the sheet; only a truly empty cell is None (shown as (blank))."""
     if v is None:
         return None
     if isinstance(v, float):
@@ -75,7 +75,9 @@ def normalize_group_value(v):
         if v.is_integer():
             return str(int(v))
     s = str(v)
-    return None if s.strip() == "" else s
+    if s == "":
+        return None
+    return "(spaces only)" if s.strip() == "" else s       # a cell holding only spaces is NOT an empty cell: Excel lists it apart from (blank)
 
 
 def clean_numeric_field(value):
@@ -369,21 +371,11 @@ def build_category_bucket_pivot(df):
                      "columns": buckets + [GRAND], "rows": rows, "category": None}}
 
 
-def build_lcgtee_currency_pivot(df, category=None):
-    """Pivot 2. `category` is the report filter (None = all categories)."""
+def build_lcgtee_currency_pivot(df):
+    """Pivot 1: rows LC/GTEE DESC, columns BILL_CCY, values Sum of Equ-IQD. CATEGORY is not used and there is no filter."""
     d = _grouped(df)
-    if category not in (None, "", "All"):
-        cats = sorted(d["CATEGORY"].unique(), key=lambda x: str(x).lower())
-        match = [c for c in cats if _key(c) == _key(category)]
-        if not match:
-            raise OutstandingError("CATEGORY %r does not exist in the data. Available categories: %s" %
-                                   (category, ", ".join(map(str, cats)) or "(none)"))
-        d = d[d["CATEGORY"] == match[0]]
-        category = match[0]
-    else:
-        category = None
     if d.empty:
-        raise OutstandingError("There are no valid Equ-IQD rows for the selected category.")
+        raise OutstandingError("There are no numeric Equ-IQD rows to pivot.")
     pv = pd.pivot_table(d, index=["LC_GTEE_DESC"], columns=["BILL_CCY"], values="EQUI_IQD", aggfunc="sum",
                         fill_value=0, margins=True, margins_name=GRAND, dropna=False)
     ccys = order_pivot_columns(list(d["BILL_CCY"].unique()), "currency")
@@ -398,12 +390,12 @@ def build_lcgtee_currency_pivot(df, category=None):
     return {"pandas": pv, "grand_total": float(pv.iloc[-1, -1]),
             "flat": {"title": "Equ-IQD by LC/GTEE Description and Billing Currency",
                      "label_cols": [DISPLAY["LC_GTEE_DESC"]], "columns": ccys + [GRAND], "rows": rows,
-                     "category": category, "column_ccy": ccys + ["TOTAL"]}}
+                     "category": None, "column_ccy": ccys + ["TOTAL"]}}
 
 
 # ------------------------------------------------------------------------------ driver
 
-def process_outstanding(path, source_name=None, category=None, sheet=None):
+def process_outstanding(path, source_name=None, sheet=None):
     """Read -> standardise -> clean -> validate -> pivot -> reconcile. Raises OutstandingError with a
     clear message rather than returning something silently wrong."""
     source_name = source_name or str(path)
@@ -414,11 +406,10 @@ def process_outstanding(path, source_name=None, category=None, sheet=None):
         raise OutstandingError("The raw-data sheet %r has no detail rows below its header." % info["sheet"])
     df = clean_source_data(df)
     validation = validate_source_data(df, info, source_name)
-    p1 = build_lcgtee_currency_pivot(df, category)           # Pivot 1: rows LC/GTEE DESC, columns BILL_CCY
-    p1_all = p1 if p1["flat"]["category"] is None else build_lcgtee_currency_pivot(df, None)
+    p1 = build_lcgtee_currency_pivot(df)                     # Pivot 1: rows LC/GTEE DESC, columns BILL_CCY
     p2 = build_category_bucket_pivot(df)                     # Pivot 2: rows CATEGORY > LC/GTEE DESC > BILL_CCY, columns Bucket
     src_total = float(df.loc[df["_STATUS"] == "ok", "EQUI_IQD"].sum())
-    diff1, diff2 = src_total - p1_all["grand_total"], src_total - p2["grand_total"]
+    diff1, diff2 = src_total - p1["grand_total"], src_total - p2["grand_total"]
     warnings = []
     if abs(diff1) > 0.005 or abs(diff2) > 0.005:
         warnings.append("Pivot grand totals do not agree with the cleaned source total (difference %s / %s)." %
@@ -454,14 +445,12 @@ def process_outstanding(path, source_name=None, category=None, sheet=None):
                    ("of which read as numbers (not counted)", int(len(like))),
                    ("Amount those would add if they were counted", like_total),
                    ("Difference: pivot total - Excel-style total of the raw column", diff_excel)]
-    validation += [("Pivot 1 Grand Total (all categories)", p1_all["grand_total"]),
-                   ("Pivot 1 Grand Total (as selected)", p1["grand_total"]), ("Pivot 2 Grand Total", p2["grand_total"]),
+    validation += [("Pivot 1 Grand Total", p1["grand_total"]), ("Pivot 2 Grand Total", p2["grand_total"]),
                    ("Reconciliation difference (source - Pivot 1)", diff1), ("Reconciliation difference (source - Pivot 2)", diff2),
                    ("Warnings", "; ".join(warnings) or "none")]
-    categories = _sorted_text(list(df["CATEGORY"].fillna(BLANK).unique()))
     return {"info": info, "df": df, "exceptions": exc, "excel_total": excel_total, "pivot1": p1, "pivot2": p2,
             "validation": validation, "warnings": warnings,
-            "categories": categories, "source_total": src_total, "selected_category": p1["flat"]["category"]}
+            "source_total": src_total}
 
 
 # ------------------------------------------------------------------------------ depth-search hand-off
@@ -590,9 +579,7 @@ def create_output_workbook(result, out_path):
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws, 32)
 
-    sel = result["selected_category"]
-    write_pivot_sheet(wb.create_sheet("Pivot_LCGTEE_Currency"), result["pivot1"]["flat"], header_row=4,
-                      subtitle="Selected CATEGORY: %s" % (sel if sel else "All"))
+    write_pivot_sheet(wb.create_sheet("Pivot_LCGTEE_Currency"), result["pivot1"]["flat"])
     write_pivot_sheet(wb.create_sheet("Pivot_Category_Bucket"), result["pivot2"]["flat"])
     ex = result.get("exceptions")
     if ex is not None and len(ex):
