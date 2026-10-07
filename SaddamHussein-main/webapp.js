@@ -460,7 +460,7 @@ function renderDepthFiles(){
     const hasOb=Object.values(state.fileTypes).some(t=>t==='offbalance');
     ex.className='notice'+(hasOb?' good':'');
     if(o) ex.innerHTML=hasOb
-      ? `Outstanding Report loaded (${esc(o.sheet)}): it is searched in the Off-balance (064) file only - its Pivot 1 (Bucket) on Maturity sheets, and Pivot 2 (CATEGORY: ${esc(o.selected_category||'All')}) on every sheet.`
+      ? `Outstanding Report loaded (${esc(o.sheet)}): it is searched in the Off-balance (064) file only - its Pivot 2 (Bucket) on Maturity sheets, and Pivot 1 (CATEGORY: ${esc(o.selected_category||'All')}) on every sheet.`
       : `Outstanding Report loaded (${esc(o.sheet)}), but no file is typed Off-balance (064) - set the type of the Off-balance submission below, otherwise its pivots are not searched.`;
   }
   if(!state.subFilesMeta.length){ box.innerHTML='<div class="muted" style="padding:6px 2px">No submission files yet — upload them in the Submissions step.</div>'; return; }
@@ -1304,9 +1304,11 @@ const AR_DICT={
 "Excel workbook with the raw outstanding-report data": "مصنف Excel يحتوي على البيانات الخام لتقرير الأرصدة القائمة",
 "Build pivots": "بناء الجداول المحورية",
 "Download pivot workbook": "تنزيل مصنف الجداول المحورية",
-"Pivot 1 · Category, LC/GTEE and Currency by Bucket": "الجدول المحوري 1 · الفئة وLC/GTEE والعملة حسب الفترة",
+"Pivot 2 · Category, LC/GTEE and Currency by Bucket": "الجدول المحوري 2 · الفئة وLC/GTEE والعملة حسب الفترة",
+"Rows: LC/GTEE DESC · Columns: BILL_CCY · Values: Sum of Equ-IQD": "الصفوف: LC/GTEE DESC · الأعمدة: BILL_CCY · القيم: مجموع Equ-IQD",
+"Rows: CATEGORY, LC/GTEE DESC, BILL_CCY · Columns: Bucket · Values: Sum of Equ-IQD": "الصفوف: CATEGORY وLC/GTEE DESC وBILL_CCY · الأعمدة: Bucket · القيم: مجموع Equ-IQD",
 "Filters: none · Columns: Bucket · Values: Sum of Equ-IQD": "المرشحات: لا يوجد · الأعمدة: الفترة · القيم: مجموع المكافئ بالدينار العراقي",
-"Pivot 2 · LC/GTEE by Currency": "الجدول المحوري 2 · LC/GTEE حسب العملة",
+"Pivot 1 · LC/GTEE by Currency": "الجدول المحوري 1 · LC/GTEE حسب العملة",
 "Filter: CATEGORY": "المرشح: الفئة",
 "Validation details": "تفاصيل التحقق",
 "All": "الكل",
@@ -1339,7 +1341,7 @@ const AR_DICT={
 "Distinct CATEGORY values": "قيم الفئة المميزة",
 "Distinct BILL_CCY values": "قيم عملة الفاتورة المميزة",
 "Distinct Bucket values": "قيم الفترات المميزة",
-"Pivot 1 Grand Total": "الإجمالي العام للجدول 1",
+"Pivot 2 Grand Total": "الإجمالي العام للجدول 2",
 "Warnings": "التحذيرات",
 "Search": "بحث",
 "Look for every Trial Balance pivot value (BS-mapping and group level) in every non-zero cell of every sheet of each submission file - schedules and matrix sheets included. Each file gets its own workbook: your original sheets, the TB pivot, a matching report, and matched cells highlighted in the same colour on both sides.": "ابحث عن كل قيمة في الجدول المحوري لميزان المراجعة (على مستوى ربط الميزانية والمجموعة) في كل خلية غير صفرية في كل ورقة من كل ملف تقرير - بما في ذلك الجداول الملحقة وأوراق المصفوفات. يحصل كل ملف على مصنفه الخاص: أوراقك الأصلية والجدول المحوري لميزان المراجعة وتقرير المطابقة، مع تظليل الخلايا المتطابقة بنفس اللون في الجانبين.",
@@ -1571,8 +1573,8 @@ const AR_DICT={
 "Repeated header rows removed": "صفوف العناوين المكررة المحذوفة",
 "Bucket labels that differ only by case/spacing": "تسميات الفترات التي تختلف في الحروف/المسافات فقط",
 "Sum of Equ-IQD by Bucket": "مجموع المكافئ بالدينار حسب الفترة",
-"Pivot 2 Grand Total (all categories)": "الإجمالي العام للجدول 2 (كل الفئات)",
-"Pivot 2 Grand Total (as selected)": "الإجمالي العام للجدول 2 (حسب الاختيار)",
+"Pivot 1 Grand Total (all categories)": "الإجمالي العام للجدول 1 (كل الفئات)",
+"Pivot 1 Grand Total (as selected)": "الإجمالي العام للجدول 1 (حسب الاختيار)",
 "Reconciliation difference (source - Pivot 1)": "فرق التسوية (المصدر - الجدول 1)",
 "Reconciliation difference (source - Pivot 2)": "فرق التسوية (المصدر - الجدول 2)",
 "· Sub-group match:": "· مطابقة المجموعة الفرعية:",
@@ -1900,8 +1902,8 @@ const AR_RULES=[
 "ملفات خارج الميزانية لا تُبحث بعد."
 ],
 [
-"^Outstanding Report loaded \\((.+)\\): it is searched in the Off-balance \\(064\\) file only - its Pivot 1 \\(Bucket\\) on Maturity sheets, and Pivot 2 \\(CATEGORY: (.+)\\) on every sheet\\.$",
-"تم تحميل تقرير الأرصدة القائمة ({1}): يُبحث عنه في ملف خارج الميزانية (064) فقط - الجدول المحوري 1 (الفترات) في أوراق الاستحقاق، والجدول المحوري 2 (الفئة: {2:t}) في كل ورقة."
+"^Outstanding Report loaded \\((.+)\\): it is searched in the Off-balance \\(064\\) file only - its Pivot 2 \\(Bucket\\) on Maturity sheets, and Pivot 1 \\(CATEGORY: (.+)\\) on every sheet\\.$",
+"تم تحميل تقرير الأرصدة القائمة ({1}): يُبحث عنه في ملف خارج الميزانية (064) فقط - الجدول المحوري 2 (الفترات) في أوراق الاستحقاق، والجدول المحوري 1 (الفئة: {2:t}) في كل ورقة."
 ],
 [
 "^Outstanding Report loaded \\((.+)\\), but no file is typed Off-balance \\(064\\) - set the type of the Off-balance submission below, otherwise its pivots are not searched\\.$",

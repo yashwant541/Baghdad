@@ -582,10 +582,11 @@
   {
    "label": "Statutory Reserve Matching Reserve Mandatory IQD",
    "currency": "IQD",
-   "rule_type": "GROUP_RULE",
+   "rule_type": "MANUAL_CLUB",
    "tb_side": [
     {
-     "level": "group",
+     "account": "208701",
+     "account_desc": "Statutory Reserve - Br. Ops",
      "bs_mapping": "L-PYR",
      "currency": "IQD",
      "sign": 1

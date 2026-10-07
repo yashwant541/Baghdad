@@ -252,9 +252,9 @@ def copy_sub(s0, ccy):
 
 # ------------------------------------------------------------------------------------------ off-balance checks
 # The same basic rules as Assets / Liabilities, but the values come from the Outstanding Report pivots:
-#   main sheet ('Off-Balance Sheet Accounts')      IQD column 3 or 4 / foreign column 5 or 6 / total column 2  <- Pivot 2 (LC/GTEE x currency)
-#   'Off-Balance Sheet Accounts by F(oreign ...)'  currency by currency, the rest against 'Other'             <- Pivot 2
-#   'Off-Balance Sheet Accounts by M(aturity)'     one check per maturity bucket column, plus the total       <- Pivot 1 (Bucket columns)
+#   main sheet ('Off-Balance Sheet Accounts')      IQD column 3 or 4 / foreign column 5 or 6 / total column 2  <- Pivot 1 (rows LC/GTEE DESC, columns BILL_CCY)
+#   'Off-Balance Sheet Accounts by F(oreign ...)'  currency by currency, the rest against 'Other'             <- Pivot 1
+#   'Off-Balance Sheet Accounts by M(aturity)'     one check per maturity bucket column, plus the total       <- Pivot 2 (rows CATEGORY > LC/GTEE > BILL_CCY, columns Bucket)
 
 OB_SOURCE = "Outstanding Report"
 _NUMWORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
@@ -369,9 +369,9 @@ def ob_templates(res, sub, notes):
     for c in ("CATEGORY", "LC_GTEE_DESC", "BILL_CCY", "BUCKET"):
         d[c] = d[c].fillna(BLANK)
     sel = res.get("selected_category")
-    d2 = d if sel in (None, "", "All") else d[d["CATEGORY"] == sel]            # Pivot 2 carries the CATEGORY filter
-    p2cols = list(res["pivot2"]["flat"]["columns"])
-    p1cols = list(res["pivot1"]["flat"]["columns"])
+    d2 = d if sel in (None, "", "All") else d[d["CATEGORY"] == sel]            # Pivot 1 carries the optional CATEGORY filter
+    p2cols = list(res["pivot1"]["flat"]["columns"])                            # currency columns (Pivot 1)
+    p1cols = list(res["pivot2"]["flat"]["columns"])                            # bucket columns (Pivot 2)
     ccys = [c for c in p2cols if c != GRAND]
     total_name = "Total Off-Balance Sheet Accounts"
     items = [("total", total_name)]
@@ -388,7 +388,8 @@ def ob_templates(res, sub, notes):
     out = []
 
     def rule(label, ccy, kind, name, amount, sheet, ccy_sub, pivot, cols, letter=None):
-        mark = None if (kind == "category" and pivot == 2) else ["ob", pivot, kind, name, list(cols)]
+        # `pivot` here: 2 = the currency pivot, 1 = the bucket pivot (the sheets are numbered the other way round)
+        mark = None if (kind == "category" and pivot == 2) else ["ob", {2: 1, 1: 2}[pivot], kind, name, list(cols)]
         shown = "Total" if kind == "total" else name
         side = {"match_text": name, "sheet": sheet, "currency": ccy_sub, "is_total": False, "sign": 1}
         if letter:
@@ -752,8 +753,8 @@ def _write_ob_pivots(wb, run, mine, bold, grey):
             for i, row in enumerate(flat["rows"]):
                 lv, lab = row["level"], row["labels"]
                 hit = (kind == "total" and lv == "Grand Total") or \
-                      (kind == "category" and n == 1 and lv == "Category" and lab[0] == name) or \
-                      (kind == "lc" and lv == "LC/GTEE" and (lab[1] if n == 1 else lab[0]) == name)
+                      (kind == "category" and n == 2 and lv == "Category" and lab[0] == name) or \
+                      (kind == "lc" and lv == "LC/GTEE" and (lab[1] if n == 2 else lab[0]) == name)
                 if not hit:
                     continue
                 for cn in colnames:

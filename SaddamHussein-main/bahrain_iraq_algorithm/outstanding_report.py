@@ -1,7 +1,7 @@
 """Outstanding Report -> the two PivotTables of the Off-Balance specification, as code.
 
-  Pivot 1  rows: CATEGORY > LC/GTEE DESC > BILL_CCY      columns: Bucket        values: Sum of Equ-IQD
-  Pivot 2  rows: LC/GTEE DESC   columns: BILL_CCY   filter: CATEGORY            values: Sum of Equ-IQD
+  Pivot 1  rows: LC/GTEE DESC   columns: BILL_CCY   (optional CATEGORY filter)  values: Sum of Equ-IQD
+  Pivot 2  rows: CATEGORY > LC/GTEE DESC > BILL_CCY      columns: Bucket        values: Sum of Equ-IQD
 
 The raw-data sheet and its header row are found dynamically (nothing is tied to a sheet name, a
 header row number, an Excel column letter, or a currency / category / bucket value); the five
@@ -391,11 +391,11 @@ def process_outstanding(path, source_name=None, category=None, sheet=None):
         raise OutstandingError("The raw-data sheet %r has no detail rows below its header." % info["sheet"])
     df = clean_source_data(df)
     validation = validate_source_data(df, info, source_name)
-    p1 = build_category_bucket_pivot(df)
-    p2 = build_lcgtee_currency_pivot(df, category)
-    p2_all = p2 if p2["flat"]["category"] is None else build_lcgtee_currency_pivot(df, None)
+    p1 = build_lcgtee_currency_pivot(df, category)           # Pivot 1: rows LC/GTEE DESC, columns BILL_CCY
+    p1_all = p1 if p1["flat"]["category"] is None else build_lcgtee_currency_pivot(df, None)
+    p2 = build_category_bucket_pivot(df)                     # Pivot 2: rows CATEGORY > LC/GTEE DESC > BILL_CCY, columns Bucket
     src_total = float(df.loc[df["_STATUS"] == "ok", "EQUI_IQD"].sum())
-    diff1, diff2 = src_total - p1["grand_total"], src_total - p2_all["grand_total"]
+    diff1, diff2 = src_total - p1_all["grand_total"], src_total - p2["grand_total"]
     warnings = []
     if abs(diff1) > 0.005 or abs(diff2) > 0.005:
         warnings.append("Pivot grand totals do not agree with the cleaned source total (difference %s / %s)." %
@@ -403,13 +403,13 @@ def process_outstanding(path, source_name=None, category=None, sheet=None):
     n_bad = int((df["_STATUS"] != "ok").sum())
     if n_bad:
         warnings.append("%d row(s) have a blank or non-numeric Equ-IQD and are excluded from every total (see Validation)." % n_bad)
-    validation += [("Pivot 1 Grand Total", p1["grand_total"]), ("Pivot 2 Grand Total (all categories)", p2_all["grand_total"]),
-                   ("Pivot 2 Grand Total (as selected)", p2["grand_total"]),
+    validation += [("Pivot 1 Grand Total (all categories)", p1_all["grand_total"]),
+                   ("Pivot 1 Grand Total (as selected)", p1["grand_total"]), ("Pivot 2 Grand Total", p2["grand_total"]),
                    ("Reconciliation difference (source - Pivot 1)", diff1), ("Reconciliation difference (source - Pivot 2)", diff2),
                    ("Warnings", "; ".join(warnings) or "none")]
     categories = _sorted_text(list(df["CATEGORY"].fillna(BLANK).unique()))
     return {"info": info, "df": df, "pivot1": p1, "pivot2": p2, "validation": validation, "warnings": warnings,
-            "categories": categories, "source_total": src_total, "selected_category": p2["flat"]["category"]}
+            "categories": categories, "source_total": src_total, "selected_category": p1["flat"]["category"]}
 
 
 # ------------------------------------------------------------------------------ depth-search hand-off
@@ -417,9 +417,9 @@ def process_outstanding(path, source_name=None, category=None, sheet=None):
 def depth_specs(result, maturity_sheet_scope="maturity"):
     """The two pivots as flat sheet specs for the depth search: header row 1, data from row 2, label
     columns first, then one column per bucket / currency, then Grand Total. Each numeric cell becomes a
-    search target. Pivot 1 (by Bucket = tenure) is only meaningful against the Maturity sheet."""
+    search target. Pivot 2 (by Bucket = tenure) is only meaningful against the Maturity sheet."""
     specs = []
-    for n, (key, scope) in enumerate((("pivot1", maturity_sheet_scope), ("pivot2", "all")), 1):
+    for n, (key, scope) in enumerate((("pivot1", "all"), ("pivot2", maturity_sheet_scope)), 1):
         flat = result[key]["flat"]
         nl = len(flat["label_cols"])
         headers = list(flat["label_cols"]) + list(flat["columns"])
@@ -427,13 +427,13 @@ def depth_specs(result, maturity_sheet_scope="maturity"):
         for i, r in enumerate(flat["rows"]):
             sheet_row = i + 2
             rows.append(list(r["labels"]) + list(r["values"]) + [r["total"]])
-            if r["level"] != "Currency" and not (key == "pivot2" and r["level"] == "LC/GTEE"):
+            if r["level"] != "Currency" and not (key == "pivot1" and r["level"] == "LC/GTEE"):
                 bold.append(sheet_row)
             vals = list(r["values"]) + [r["total"]]
             for j, amount in enumerate(vals):
                 col = nl + 1 + j
                 col_name = flat["columns"][j]
-                if key == "pivot1":
+                if key == "pivot2":
                     ccy = r["ccy"]
                     label = " / ".join(x for x in r["labels"] if x) + ("" if col_name == GRAND else "  |  " + col_name)
                     names = [x for x in r["labels"] if x]
@@ -518,7 +518,7 @@ def write_validation_sheet(ws, validation):
 
 
 def create_output_workbook(result, out_path):
-    """Source_Cleaned, Pivot_Category_Bucket, Pivot_LCGTEE_Currency, Validation."""
+    """Source_Cleaned, Pivot_LCGTEE_Currency (Pivot 1), Pivot_Category_Bucket (Pivot 2), Validation."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Source_Cleaned"
@@ -538,10 +538,10 @@ def create_output_workbook(result, out_path):
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws, 32)
 
-    write_pivot_sheet(wb.create_sheet("Pivot_Category_Bucket"), result["pivot1"]["flat"])
     sel = result["selected_category"]
-    write_pivot_sheet(wb.create_sheet("Pivot_LCGTEE_Currency"), result["pivot2"]["flat"], header_row=4,
+    write_pivot_sheet(wb.create_sheet("Pivot_LCGTEE_Currency"), result["pivot1"]["flat"], header_row=4,
                       subtitle="Selected CATEGORY: %s" % (sel if sel else "All"))
+    write_pivot_sheet(wb.create_sheet("Pivot_Category_Bucket"), result["pivot2"]["flat"])
     write_validation_sheet(wb.create_sheet("Validation"), result["validation"])
     wb.save(out_path)
     return out_path

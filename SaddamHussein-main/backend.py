@@ -556,7 +556,7 @@ def outstanding_category():
     res=d['outstanding']['result']
     try: p2=OR.build_lcgtee_currency_pivot(res['df'],body.get('category') or None)
     except OR.OutstandingError as exc: return jsonify({'ok':False,'error':str(exc)}),400
-    res['pivot2']=p2; res['selected_category']=p2['flat']['category']; d['depth']=None
+    res['pivot1']=p2; res['selected_category']=p2['flat']['category']; d['depth']=None
     return jsonify(_ob_payload(d))
 
 @app.route('/api/outstanding/download',methods=['GET'])

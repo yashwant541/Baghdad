@@ -94,11 +94,12 @@
   <button type="button" class="secondary" id="btnOutstandingDl" data-action="download-outstanding" style="display:none">Download pivot workbook</button></div>
 <div id="obMessage"></div><div id="obKpis" class="kpis"></div>
 <div id="obBody" style="display:none">
-  <h3 class="subhead">Pivot 1 · Category, LC/GTEE and Currency by Bucket</h3>
-  <p class="muted">Filters: none · Columns: Bucket · Values: Sum of Equ-IQD</p>
-  <div class="tableWrap"><table id="obPivot1"></table></div>
-  <h3 class="subhead">Pivot 2 · LC/GTEE by Currency</h3>
+  <h3 class="subhead">Pivot 1 · LC/GTEE by Currency</h3>
+  <p class="muted">Rows: LC/GTEE DESC · Columns: BILL_CCY · Values: Sum of Equ-IQD</p>
   <div class="obFilter"><label>Filter: CATEGORY <select id="obCategory" data-action="ob-category"></select></label></div>
+  <div class="tableWrap"><table id="obPivot1"></table></div>
+  <h3 class="subhead">Pivot 2 · Category, LC/GTEE and Currency by Bucket</h3>
+  <p class="muted">Rows: CATEGORY, LC/GTEE DESC, BILL_CCY · Columns: Bucket · Values: Sum of Equ-IQD</p>
   <div class="tableWrap"><table id="obPivot2"></table></div>
   <details class="obValidation"><summary>Validation details</summary><div class="tableWrap"><table id="obValidation"></table></div></details>
 </div>
