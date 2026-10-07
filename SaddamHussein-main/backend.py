@@ -231,7 +231,7 @@ def _default_payload(d,run):
         sheets=[s['sheet'] for s in d['sub_inspect'].get(entry['label'],[])]
         mine=DR._results_for_file(run['results'],entry['label'],sheets)
         files.append({'file':entry['label'],'summary':DR.summarise(mine),'rules':[r['n'] for r in mine]})
-    return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files}
+    return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files,'groups':run.get('groups',[])}
 
 def _dm_unavailable():
     return jsonify({'ok':False,'error':'The default-mapping report needs the latest bahrain_iraq_algorithm library in your project '

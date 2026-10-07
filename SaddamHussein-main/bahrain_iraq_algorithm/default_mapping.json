@@ -199,207 +199,10 @@
   {
    "label": "A-OA Matches Other Assets IQD",
    "currency": "IQD",
-   "rule_type": "MANUAL_CLUB",
+   "rule_type": "GROUP_RULE",
    "tb_side": [
     {
-     "account": "165202",
-     "account_desc": "Leased Property Asset ROU -CLM",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "165202",
-     "account_desc": "Leased Property Asset ROU -CLM",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "165202",
-     "account_desc": "Leased Property Asset ROU -CLM",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "165202",
-     "account_desc": "Leased Property Asset ROU -CLM",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "165302",
-     "account_desc": "Leased Propty AssetAccDep -CLM",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "165302",
-     "account_desc": "Leased Propty AssetAccDep -CLM",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "165302",
-     "account_desc": "Leased Propty AssetAccDep -CLM",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "165302",
-     "account_desc": "Leased Propty AssetAccDep -CLM",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "170803",
-     "account_desc": "Prepayment of Expenditure",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "170803",
-     "account_desc": "Prepayment of Expenditure",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "170803",
-     "account_desc": "Prepayment of Expenditure",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "170803",
-     "account_desc": "Prepayment of Expenditure",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "171519",
-     "account_desc": "AIR-Ln-Br(O)",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "171519",
-     "account_desc": "AIR-Ln-Br(O)",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "171519",
-     "account_desc": "AIR-Ln-Br(O)",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "171519",
-     "account_desc": "AIR-Ln-Br(O)",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "175177",
-     "account_desc": "AIR-Ln-C.Bk/Gov(O)",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "175614",
-     "account_desc": "AIR-Ln-Bk(O)",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "185402",
-     "account_desc": "MTM FX Asset- Group: Int Brch",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "185402",
-     "account_desc": "MTM FX Asset- Group: Int Brch",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "185502",
-     "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "185502",
-     "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "185502",
-     "account_desc": "Unreal.P/L-Derivatives Dr.Bal",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "285402",
-     "account_desc": "MTM FX Liab- Group: Inter Brch",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "285402",
-     "account_desc": "MTM FX Liab- Group: Inter Brch",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "288849",
-     "account_desc": "Payroll Suspense",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "288870",
-     "account_desc": "Subsys Interface Suspense",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "289007",
-     "account_desc": "Branch FX Suspense",
-     "bs_mapping": "A-OA",
-     "currency": "IQD",
-     "sign": 1
-    },
-    {
-     "account": "291524",
-     "account_desc": "Group Amort Payable",
+     "level": "group",
      "bs_mapping": "A-OA",
      "currency": "IQD",
      "sign": 1
@@ -2423,6 +2226,57 @@
      "sign": -1
     }
    ]
+  },
+  {
+   "label": "A-CBI + A-CRR Balances with the Central Bank",
+   "currency": "TOTAL",
+   "rule_type": "ASSET_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "A-CBI",
+    "A-CRR"
+   ],
+   "row": "Balances with the Central Bank (First + Second) According to Schedule No. 3"
+  },
+  {
+   "label": "A-TB Net Investments in Papers / Securities",
+   "currency": "TOTAL",
+   "rule_type": "ASSET_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "A-TB"
+   ],
+   "row": "Net Investments In Papers / Securities Financial ( A+B — Pound )  Pursuant To / Under Schedule / Table ( 5 )  ( A   , B  )"
+  },
+  {
+   "label": "A-FA Fixed Assets (A + B)",
+   "currency": "TOTAL",
+   "rule_type": "ASSET_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "A-FA"
+   ],
+   "row": "Fixed Assets (A + B)"
+  },
+  {
+   "label": "A-OA Other Assets",
+   "currency": "TOTAL",
+   "rule_type": "ASSET_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "A-OA"
+   ],
+   "row": "Other Assets (List to be Prepared)"
+  },
+  {
+   "label": "All Assets (A-*) Total Assets",
+   "currency": "TOTAL",
+   "rule_type": "ASSET_GROUP",
+   "derived": true,
+   "tb_groups": [
+    "A-*"
+   ],
+   "row": "Total Assets"
   }
  ]
 }

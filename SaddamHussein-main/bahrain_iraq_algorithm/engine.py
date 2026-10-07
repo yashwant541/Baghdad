@@ -876,9 +876,11 @@ class ReconEngine:
                         sc=0.5*sc+0.5*ctx_sc
                     scored.append((sc,[idx]))
             else:
-                # a line is a ROW of the sheet. The row is found by its description; its value is then the sum of
-                # the row's cells in the item's currency (IQD sits in two columns - Residents + Non-Residents - and
-                # foreign currency in two more). A row with nothing in that currency counts as zero.
+                # a line is a ROW of the sheet. The row is found by its description. IQD sits in two columns (Residents /
+                # Non-Residents) and foreign currency in two more, but a Trial Balance group subtotal is found in ONE of
+                # them, not as their sum - so each cell of the item's currency is a candidate of its own and the one that
+                # agrees with the TB amount is used (item field "aggregate":"sum" restores adding them up). A row with
+                # nothing in that currency counts as zero.
                 units={}
                 for idx,row in pool.iterrows():
                     sc=text_similarity(text,row.line_description)
@@ -893,10 +895,18 @@ class ReconEngine:
             # every line that carries (essentially) the same description is a "hit"; if there is more than one,
             # the amount decides below.
             cands=[(sc,idxs) for sc,idxs in scored if sc>=best_score-0.05][:12]
+            n_units=len(cands)
+            if (not cell_mode) and ccy and sheet_has_ccy and item.get('aggregate')!='sum':
+                exp=[]
+                for sc,idxs in cands:
+                    same=[i for i in idxs if submissions.loc[i,'currency']==ccy]
+                    if len(same)>1: exp.extend((sc,[i]) for i in same)
+                    else: exp.append((sc,idxs))
+                cands=exp
             def restrict(idxs,ccy=ccy,has=sheet_has_ccy,cell_mode=cell_mode):
                 if cell_mode or not ccy or not has: return list(idxs)
                 return [i for i in idxs if submissions.loc[i,'currency']==ccy]
-            pending.append({'text':text,'sign':item.get('sign',1),'cands':cands,'restrict':restrict,'ccy':ccy})
+            pending.append({'text':text,'sign':item.get('sign',1),'cands':cands,'restrict':restrict,'ccy':ccy,'units':n_units})
 
         # --- several lines share a description? pick by amount, not by position ---
         # The submission side only knows a *description*, and the same label often recurs (other sections, other
@@ -908,7 +918,7 @@ class ReconEngine:
         usum=lambda p,idxs: sum(float(submissions.loc[i,'normalized_amount']) for i in p['restrict'](idxs))*p['sign']
         picks=[p['cands'][0] for p in pending]
         amb=[i for i,p in enumerate(pending) if len(p['cands'])>1]
-        by_amount=False
+        by_amount=False; nearest=set()
         if amb and tb_components:
             n_combos=1
             for i in amb: n_combos*=len(pending[i]['cands'])
@@ -927,14 +937,25 @@ class ReconEngine:
                 if best:
                     by_amount=True
                     for i,cnd in zip(amb,best[1]): picks[i]=cnd
+        if amb and not by_amount and len(pending)==1:
+            # none agrees with the TB amount: among the cells of the best-matching row, show the closest one so the variance is meaningful
+            p=pending[0]; first=p['cands'][0][1][0]; fr=submissions.loc[first]
+            same=[(sc,idxs) for sc,idxs in p['cands'] if (submissions.loc[idxs[0],'submission_file'],submissions.loc[idxs[0],'sheet'],
+                                                           int(submissions.loc[idxs[0],'row_number']))==(fr.submission_file,fr.sheet,int(fr.row_number))]
+            if len(same)>1:
+                picks[0]=min(same,key=lambda c:abs(tb_target-usum(p,c[1]))); nearest.add(0)
         for i in amb:
             p=pending[i]; r=submissions.loc[picks[i][1][0]]
             cells='+'.join(str(submissions.loc[j,'source_cell']) for j in p['restrict'](picks[i][1])) or '(blank)'
-            if by_amount:
-                warnings.append(f"{len(p['cands'])} submission lines match {p['text']!r}; picked {r.sheet}!{cells} "
+            if p['units']<=1:                    # only the choice between the row's own cells (e.g. Residents / Non-Residents)
+                if i in nearest:
+                    warnings.append(f"{p['text']!r}: the Trial Balance amount is in none of the {'foreign-currency' if p['ccy']==FRX_CODE else p['ccy']} columns of the row; "
+                                    f"showing the closest one ({r.sheet}!{cells}).")
+            elif by_amount:
+                warnings.append(f"{p['units']} submission lines match {p['text']!r}; picked {r.sheet}!{cells} "
                                 f"because its amount agrees with the Trial Balance amount.")
             else:
-                warnings.append(f"{len(p['cands'])} submission lines match {p['text']!r} and none agrees with the Trial Balance "
+                warnings.append(f"{p['units']} submission lines match {p['text']!r} and none agrees with the Trial Balance "
                                 f"amount; took {r.sheet}!{cells} (best name match) — please review.")
         for p,(sc,idxs) in zip(pending,picks):
             cells=p['restrict'](idxs)
@@ -999,9 +1020,14 @@ class ReconEngine:
         genuinely empty group shows up as a variance instead of as a missing item."""
         bsm=str(item.get('bs_mapping') or '').strip(); ccy=str(item.get('currency') or 'TOTAL').strip()
         warnings=[]; sign=item.get('sign',1)
-        allrows=tb[tb.bs_mapping.astype(str).str.strip()==bsm]
-        if not len(allrows):
-            allrows=tb[tb.bs_mapping.astype(str).str.strip().str.lower()==bsm.lower()]
+        bs_col=tb.bs_mapping.astype(str).str.strip()
+        wildcard=bsm.endswith('*')                       # 'A-*' = every BS-mapping group starting with 'A-'
+        if wildcard:
+            allrows=tb[bs_col.str.lower().str.startswith(bsm[:-1].lower())]
+        else:
+            allrows=tb[bs_col==bsm]
+            if not len(allrows):
+                allrows=tb[bs_col.str.lower()==bsm.lower()]
         if not len(allrows):
             warnings.append(f"BS mapping group {bsm!r} is not in this Trial Balance - treated as zero.")
         rows=allrows
@@ -1038,7 +1064,8 @@ class ReconEngine:
                           'sign':sign,'group_rule':True,'placeholder':True,'_rule_id':rid})
         plain=not (inc or exc or sf or excl)
         key=FRX_CODE if ccy==FRX_CODE else ('TOTAL' if ccy=='TOTAL' else (LOCAL_CCY if ccy in ('IQD','LCY') else ccy))
-        if plain: marks=[['pivot',bsm,key]]
+        if plain and wildcard: marks=[['pivot',g_,key] for g_ in sorted(set(allrows.bs_mapping.astype(str).str.strip()))]
+        elif plain: marks=[['pivot',bsm,key]]
         else: marks=[['acct',c['bs_mapping'],str(c['account']),str(c['account_desc']),c['currency']] for c in comps if not c.get('placeholder')]
         return comps,warnings,marks
 

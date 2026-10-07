@@ -65,7 +65,9 @@ def _ccy_text(c, excl=None):
 
 
 def describe_group_item(it):
-    bits = ["BS group %s" % it.get("bs_mapping"), _ccy_text(it.get("currency"), it.get("exclude_currencies"))]
+    bsm = str(it.get("bs_mapping") or "")
+    name = ("every BS group starting with '%s' (all Assets)" % bsm[:-1]) if bsm.endswith("*") else "BS group %s" % bsm
+    bits = [name, _ccy_text(it.get("currency"), it.get("exclude_currencies"))]
     if it.get("sign_filter") == "positive":
         bits.append("positive account balances only")
     elif it.get("sign_filter") == "negative":
@@ -79,9 +81,9 @@ def describe_group_item(it):
 
 def _sub_col_text(ccy):
     if ccy == "IQD":
-        return "IQD columns of that row (Residents + Non-Residents)"
+        return "the IQD column of that row that holds the amount (Residents or Non-Residents)"
     if ccy == FRX_CODE:
-        return "foreign-currency columns of that row (Residents + Non-Residents)"
+        return "the foreign-currency column of that row that holds the amount (Residents or Non-Residents)"
     if ccy == "TOTAL":
         return "Total column of that row"
     return "%s column of that row" % ccy
@@ -111,32 +113,96 @@ def describe_rule(t):
 
 # ------------------------------------------------------------------------------------------ expansion
 
-def expand_templates(templates, tb, sub):
-    """Concrete templates: FC_COLUMNS templates expand from the target sheet's own currency columns."""
+def _fc_expand(t, sub):
+    """One FC_COLUMNS template -> a rule per direct currency column of the sheet + an 'Other Foreign Currencies' rule."""
     out = []
-    for t in templates:
-        if t.get("rule_type") != "FC_COLUMNS":
-            out.append(t)
-            continue
-        s0 = (t.get("submission_side") or [{}])[0]
-        sheet = s0.get("sheet")
-        on_sheet = sub[sub.sheet == sheet] if (sub is not None and len(sub)) else sub
-        codes = sorted(set(on_sheet.currency)) if (on_sheet is not None and len(on_sheet)) else []
-        direct = [c for c in codes if c not in ("TOTAL", "IQD", FRX_CODE, "UNSPECIFIED") and not str(c).startswith("TOTAL_")]
-        has_other = FRX_CODE in codes
-        if not direct and not has_other:
-            out.append({"label": t["label"], "currency": "TOTAL", "rule_type": "GROUP_RULE", "tb_side": [],
-                        "submission_side": copy_sub(s0, "TOTAL"), "_fc_missing": True})
-            continue
-        for c in direct:
-            out.append({"label": "%s - %s" % (t["label"], c), "currency": c, "rule_type": "GROUP_RULE", "_expanded": True,
-                        "tb_side": [grp(g, c) for g in t.get("tb_groups", [])], "submission_side": copy_sub(s0, c)})
-        if has_other:
-            out.append({"label": "%s - Other Foreign Currencies" % t["label"], "currency": FRX_CODE, "rule_type": "GROUP_RULE",
-                        "_expanded": True,
-                        "tb_side": [grp(g, FRX_CODE, exclude_currencies=list(direct)) for g in t.get("tb_groups", [])],
-                        "submission_side": copy_sub(s0, FRX_CODE)})
+    s0 = (t.get("submission_side") or [{}])[0]
+    sheet = s0.get("sheet")
+    on_sheet = sub[sub.sheet == sheet] if (sub is not None and len(sub)) else sub
+    codes = sorted(set(on_sheet.currency)) if (on_sheet is not None and len(on_sheet)) else []
+    direct = [c for c in codes if c not in ("TOTAL", "IQD", FRX_CODE, "UNSPECIFIED") and not str(c).startswith("TOTAL_")]
+    has_other = FRX_CODE in codes
+    if not direct and not has_other:
+        out.append({"label": t["label"], "currency": "TOTAL", "rule_type": "GROUP_RULE", "tb_side": [],
+                    "submission_side": copy_sub(s0, "TOTAL"), "_fc_missing": True, "derived": t.get("derived")})
+        return out
+    for c in direct:
+        out.append({"label": "%s - %s" % (t["label"], c), "currency": c, "rule_type": "GROUP_RULE", "_expanded": True,
+                    "derived": t.get("derived"), "tb_side": [grp(g, c) for g in t.get("tb_groups", [])],
+                    "submission_side": copy_sub(s0, c)})
+    if has_other:
+        out.append({"label": "%s - Other Foreign Currencies" % t["label"], "currency": FRX_CODE, "rule_type": "GROUP_RULE",
+                    "_expanded": True, "derived": t.get("derived"),
+                    "tb_side": [grp(g, FRX_CODE, exclude_currencies=list(direct)) for g in t.get("tb_groups", [])],
+                    "submission_side": copy_sub(s0, FRX_CODE)})
     return out
+
+
+def _asset_group(t):
+    """ASSET_GROUP template (the logic of 'Iraq Changes.docx'): for the row of one BS-mapping group (or groups)
+    - Assets sheet, IQD column 3 or 4 = TB group, IQD only (the subtotal is in ONE of them, not their sum)
+    - Assets sheet, foreign column 5 or 6 = TB group, every non-IQD currency
+    - Assets sheet, total column (2)   = TB group, all currencies
+    - Assets by Foreign Currency       = TB group currency by currency; the rest against 'Other Foreign Currencies'
+    - Assets by Maturity, total column = TB group, all currencies
+    Fields: label, tb_groups, row (text of the row; row_foreign / row_maturity override it per sheet), include (subset of
+    IQD, FRX, TOTAL, FC, MATURITY), sheets (names of the three sheets, if they differ)."""
+    groups = t.get("tb_groups") or []
+    names = {"assets": "Assets", "foreign": "Assets by Foreign Currency", "maturity": "Assets by Maturity"}
+    names.update(t.get("sheets") or {})
+    inc = set(t.get("include") or ["IQD", "FRX", "TOTAL", "FC", "MATURITY"])
+    sign = t.get("sign", 1)
+    text = t.get("row") or t.get("label")
+
+    def sub(sheet, txt, ccy):
+        return [{"match_text": txt, "sheet": sheet, "currency": ccy, "is_total": False, "sign": sign}]
+
+    out = []
+    for ccy, what in (("IQD", "IQD (Assets column 3 or 4)"), ("FRX", "foreign currencies (Assets column 5 or 6)"), ("TOTAL", "total (Assets column 2)")):
+        if ccy in inc:
+            out.append({"label": "%s - %s" % (t["label"], what), "currency": ccy, "rule_type": "GROUP_RULE", "_expanded": True, "derived": True,
+                        "tb_side": [grp(g, ccy) for g in groups], "submission_side": sub(names["assets"], text, ccy)})
+    if "FC" in inc:
+        out.append({"label": "%s - by currency" % t["label"], "currency": "FC", "rule_type": "FC_COLUMNS", "derived": True,
+                    "tb_groups": list(groups), "submission_side": sub(names["foreign"], t.get("row_foreign") or text, "TOTAL")})
+    if "MATURITY" in inc:
+        out.append({"label": "%s - total (Assets by Maturity)" % t["label"], "currency": "TOTAL", "rule_type": "GROUP_RULE",
+                    "_expanded": True, "derived": True, "tb_side": [grp(g, "TOTAL") for g in groups],
+                    "submission_side": sub(names["maturity"], t.get("row_maturity") or text, "TOTAL")})
+    return out
+
+
+def _rule_key(t):
+    tb = []
+    for x in t.get("tb_side") or []:
+        if x.get("level") != "group":
+            return None
+        tb.append((str(x.get("bs_mapping")).lower(), x.get("currency"), x.get("sign_filter"), tuple(x.get("include_desc") or ()),
+                   tuple(x.get("exclude_desc") or ()), tuple(sorted(x.get("exclude_currencies") or ())), x.get("sign", 1)))
+    if not tb:
+        return None
+    subs = tuple((x.get("sheet"), re.sub(r"\W+", "", str(x.get("match_text")).lower())[:30], x.get("currency"), x.get("sign", 1))
+                 for x in t.get("submission_side") or [])
+    return (tuple(sorted(tb)), subs)
+
+
+def expand_templates(templates, tb, sub):
+    """Concrete templates. ASSET_GROUP and FC_COLUMNS templates expand from the target sheets' own currency columns;
+    a derived (ASSET_GROUP) rule that an explicit rule already covers is dropped, so nothing is counted twice."""
+    staged = []
+    for t in templates:
+        if t.get("rule_type") == "ASSET_GROUP":
+            staged.extend(_asset_group(t))
+        else:
+            staged.append(t)
+    out = []
+    for t in staged:
+        if t.get("rule_type") == "FC_COLUMNS":
+            out.extend(_fc_expand(t, sub))
+        else:
+            out.append(t)
+    explicit = set(k for k in (_rule_key(t) for t in out if not t.get("derived")) if k)
+    return [t for t in out if not (t.get("derived") and _rule_key(t) in explicit)]
 
 
 def grp(bsm, ccy, **kw):
@@ -207,7 +273,8 @@ def run_default_mapping(eng, tb, sub, templates=None):
             "files": sorted(set(c["submission_file"] for c in sbc)),
             "target_sheets": sorted(set(x.get("sheet") for x in t.get("submission_side", []) if x.get("sheet"))),
             "where": _cells_text(sbc), "tb_components": tbc, "components": sbc, "warnings": notes,
-            "tb_marks": resolved.get("tb_marks", []), "expanded": bool(t.get("_expanded")), "resolved": resolved,
+            "tb_marks": resolved.get("tb_marks", []), "expanded": bool(t.get("_expanded")), "derived": bool(t.get("derived")), "resolved": resolved,
+            "wildcard": any(str(x.get("bs_mapping") or "").endswith("*") for x in (t.get("tb_side") or []) if x.get("level") == "group"),
             "n_tb": sum(1 for c in tbc if not c.get("placeholder")), "n_sub": sum(1 for c in sbc if not c.get("placeholder")),
             "color": ""})
     palette_i = 0
@@ -215,8 +282,31 @@ def run_default_mapping(eng, tb, sub, templates=None):
         if r["n_sub"]:
             r["color"] = PALETTE[palette_i % len(PALETTE)]
             palette_i += 1
-    return {"results": results, "summary": summarise(results),
+    return {"results": results, "summary": summarise(results), "groups": group_coverage(tb, results),
             "params": {"tol_abs": eng.tolerance_abs, "tol_pct": eng.tolerance_pct}}
+
+
+def group_coverage(tb, results):
+    """Every BS-mapping group of the Trial Balance and the rules that read it (the 'Total Assets' checks, which read
+    every A- group, are not counted). A group no rule reads is listed with its amounts so it can be mapped."""
+    by = defaultdict(set)
+    for r in results:
+        if r.get("wildcard"):
+            continue
+        for c in r["tb_components"]:
+            if not c.get("placeholder"):
+                by[str(c.get("bs_mapping")).strip()].add(r["n"])
+    out = []
+    if tb is None or not len(tb):
+        return out
+    t = tb.copy()
+    t["_g"] = t.bs_mapping.astype(str).str.strip()
+    for g, grp_ in t.groupby("_g", sort=True):
+        local = grp_.tran_ccy == LOCAL_CCY
+        out.append({"group": g if g else "(blank)", "iqd": float(grp_[local].adjusted_balance.sum()),
+                    "frx": float(grp_[~local].adjusted_balance.sum()), "total": float(grp_.adjusted_balance.sum()),
+                    "rules": sorted(by.get(g, [])), "covered": bool(by.get(g))})
+    return out
 
 
 def summarise(results):
@@ -233,7 +323,7 @@ def public_results(run):
     for r in run["results"]:
         out.append({k: r[k] for k in ("n", "label", "rule_type", "currency", "rule_text", "tb_amount", "sub_amount", "variance",
                                       "variance_pct", "status", "files", "target_sheets", "where", "warnings", "color",
-                                      "n_tb", "n_sub", "expanded")})
+                                      "n_tb", "n_sub", "expanded", "derived")})
     return out
 
 
@@ -362,6 +452,22 @@ def write_default_workbook(path_in, path_out, label, tb, run):
         wd.column_dimensions[letter].width = w
     wd.freeze_panes = "A2"
 
+    # -- every TB group and the rules that read it
+    wg = wb.create_sheet(_unique_name(wb, "Default Mapping Groups"))
+    wg.append(["BS mapping group", "IQD", "Foreign currencies", "Total", "Rules (#) that read it", "Covered?"])
+    for c in wg[1]:
+        c.font, c.fill = bold, grey
+    for g in run.get("groups") or []:
+        wg.append([g["group"], g["iqd"], g["frx"], g["total"], ", ".join(str(n) for n in g["rules"]),
+                   "Yes" if g["covered"] else "NO RULE"])
+        for col in (2, 3, 4):
+            wg.cell(row=wg.max_row, column=col).number_format = "#,##0.00;[Red]-#,##0.00"
+        if not g["covered"]:
+            wg.cell(row=wg.max_row, column=6).fill = _fill(STATUS_HEX["NOT_FOUND"])
+    for letter, w in zip("ABCDEF", [24, 20, 20, 20, 40, 12]):
+        wg.column_dimensions[letter].width = w
+    wg.freeze_panes = "A2"
+
     # -- summary
     ws = wb.create_sheet(_unique_name(wb, "Default Mapping Summary"))
     sm = summarise(mine)
@@ -431,7 +537,20 @@ def build_pdf(run, files=None, tb_name="", suggestions=None, approved=None, manu
               rows, [0.5, 3.4, 4.6, 0.8, 1.6, 1.6, 1.5, 1.0, 1.5, 2.6], size=6.2,
               aligns=["l", "l", "l", "l", "r", "r", "r", "r", "l", "l"], fills=fills)
 
-    pdf.heading("3. Rule detail - Trial Balance side and submission side", 12)
+    groups = run.get("groups") or []
+    if groups:
+        pdf.heading("3. Trial Balance groups and the rules that read them", 12)
+        un = [g for g in groups if not g["covered"] and (abs(g["total"]) > 1e-6)]
+        pdf.paragraph("%d of %d BS-mapping groups are read by at least one rule. %s" % (
+            len(groups) - len(un), len(groups),
+            ("Groups no rule reads yet (they still need a mapping): " + ", ".join(g["group"] for g in un)) if un else
+            "Every group with a balance is covered."), 8, color=(0.1, 0.1, 0.1))
+        pdf.table(["BS mapping group", "IQD", "Foreign currencies", "Total", "Rules"],
+                  [[g["group"], _money(g["iqd"]), _money(g["frx"]), _money(g["total"]),
+                    ", ".join("#%d" % n for n in g["rules"]) if g["rules"] else "NO RULE"] for g in groups],
+                  [2, 1.6, 1.8, 1.6, 4], size=6.6, aligns=["l", "r", "r", "r", "l"],
+                  fills=[{} if g["covered"] else {4: STATUS_RGB["NOT_FOUND"]} for g in groups])
+    pdf.heading("4. Rule detail - Trial Balance side and submission side", 12)
     for r in results:
         pdf.ensure(70)
         pdf.paragraph("#%d  %s" % (r["n"], r["label"]), 9.5, True, gap=1)
@@ -462,7 +581,7 @@ def build_pdf(run, files=None, tb_name="", suggestions=None, approved=None, manu
             pdf.paragraph("Notes: " + " | ".join(r["warnings"][:4]), 6.8, color=(0.45, 0.35, 0.05), gap=6)
 
     if suggestions:
-        pdf.heading("4. Auto-suggested matches (Mapping Studio)", 12)
+        pdf.heading("5. Auto-suggested matches (Mapping Studio)", 12)
         rows = []
         for i, sg in enumerate(suggestions):
             ok = bool(approved[i]) if approved and i < len(approved) else False
@@ -473,7 +592,7 @@ def build_pdf(run, files=None, tb_name="", suggestions=None, approved=None, manu
                   rows, [4, 0.8, 2.2, 1.6, 1.8, 1.5, 1, 1.3], size=6.4, aligns=["l", "l", "l", "r", "r", "r", "r", "l"])
 
     if manual_matches:
-        pdf.heading("5. Manual and imported matches (Mapping Studio)", 12)
+        pdf.heading("6. Manual and imported matches (Mapping Studio)", 12)
         rows = []
         for m in manual_matches:
             tb = sum(c.get("amount", 0) * c.get("sign", 1) for c in m.get("tb_components", []))
