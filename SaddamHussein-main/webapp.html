@@ -7,6 +7,7 @@
     <div class="step" data-page="pivot"><span class="stepIcon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 9v12"/></svg></span><span class="stepLabel">TB Pivot</span></div>
     <div class="step" data-page="offbal"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><rect x="3" y="4" width="18" height="16" rx="3"/></svg></span><span class="stepLabel">Off-Balance</span></div>
     <div class="step" data-page="subs"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 14v6h16v-6"/><path d="M12 3v11M7 9l5-5 5 5"/></svg></span><span class="stepLabel">Submissions</span></div>
+    <div class="step" data-page="defaultmap"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8.5 9h7M8.5 13h7M8.5 17h4"/><path d="m15 15 1.5 1.5L19.5 13" /></svg></span><span class="stepLabel">Default Mapping</span></div>
     <div class="step" data-page="depth"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 10.5h5M10.5 8v5"/></svg></span><span class="stepLabel">Depth Search</span></div>
     <div class="step" data-page="mapping"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle class="dotc" cx="6" cy="6" r="2.2"/><circle class="dotc" cx="6" cy="18" r="2.2"/><circle class="dotc" cx="18" cy="12" r="2.2"/><path d="M8 7l8 4M8 17l8-4"/></svg></span><span class="stepLabel">Mapping Studio</span></div>
     <div class="step" data-page="coverage"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M6 2h12v20H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></span><span class="stepLabel">Mapping Coverage</span></div>
@@ -100,6 +101,25 @@
   <div class="obFilter"><label>Filter: CATEGORY <select id="obCategory" data-action="ob-category"></select></label></div>
   <div class="tableWrap"><table id="obPivot2"></table></div>
   <details class="obValidation"><summary>Validation details</summary><div class="tableWrap"><table id="obValidation"></table></div></details>
+</div>
+</section>
+
+<section id="defaultmap" class="page">
+<div class="title"><div><span class="kicker">Rules</span><h2>Default Mapping</h2><p>The bundled mapping is applied to the Trial Balance and every submission file as soon as the submissions are extracted. Each file gets its own workbook — your original sheets, the TB pivot and accounts, a report that states each rule, the Trial Balance and submission amounts and the variance, and the matched cells highlighted in one colour on both sides. The same results can be downloaded as a PDF.</p></div></div>
+<div class="notice" id="dmPrereq">Upload the Trial Balance, then upload and extract the submission workbooks (Submissions step). The default mapping runs automatically.</div>
+<div id="dmBody" style="display:none">
+<div class="depthSettings">
+  <label>Tolerance (absolute)<input id="dmTolAbs" type="number" value="1" min="0" step="any"></label>
+  <label>Tolerance (% of the TB amount)<input id="dmTolPct" type="number" value="0.01" min="0" step="any"></label>
+</div>
+<div class="actions"><button type="button" class="secondary" data-action="dm-rerun">Re-run with these tolerances</button>
+  <button type="button" class="primary" data-action="dm-pdf">Download PDF (all results)</button>
+  <button type="button" class="secondary" id="btnDmAll" data-action="dm-download-all">Download all workbooks (zip)</button></div>
+<div id="dmKpis" class="kpis"></div>
+<div class="notice" id="dmNote" style="display:none"></div>
+<div class="dmFilters"><input class="search" id="dmFilter" placeholder="Filter rules (name, how it works, sheet, cell…)">
+  <select id="dmStatus"><option value="">All statuses</option><option value="REVIEW_REQUIRED">Variance - review</option><option value="MATCH_WITHIN_TOLERANCE">Match (within tolerance)</option><option value="MATCH">Match</option><option value="NOT_FOUND">Not found</option></select></div>
+<div id="dmFiles"></div>
 </div>
 </section>
 

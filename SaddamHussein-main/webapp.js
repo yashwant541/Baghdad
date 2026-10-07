@@ -3,7 +3,7 @@
    through addEventListener + event delegation, and every network call goes
    through api() which never lets a non-JSON / error response fail silently. */
 
-let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',fileTypes:{},depth:null,workLang:null,outstanding:null,uiLang:'en',
+let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',fileTypes:{},depth:null,defaultRun:null,workLang:null,outstanding:null,uiLang:'en',
   tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
   subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),subExtra:[],
   suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[],
@@ -312,7 +312,9 @@ async function extractSubs(){
   // uploaded mapping, just without the upload step. Still fully reviewable
   // (and removable) before you ever run the reconciliation.
   const defaultMatches=j.default_mapping_matches||[];
+  state.manualMatches=state.manualMatches.filter(m=>m.source!=='DEFAULT');
   defaultMatches.forEach(r=>state.manualMatches.push({...r.resolved,warnings:r.warnings||[]}));
+  state.defaultRun=j.default_results||null; renderDefault();
   state.mappingCoverage=j.mapping_coverage||[];
   state.mappingCoverageSummary=j.mapping_coverage_summary||null;
   const defaultNote=defaultMatches.length
@@ -326,7 +328,7 @@ async function extractSubs(){
     {key:'currency',label:'Currency'},{key:'is_total',label:'Total row?',render:v=>v?'<span class="pill MATCH">TOTAL</span>':''},
     {key:'normalized_amount',label:'Amount'}]);
   renderSuggestions(); renderSubPicker(); renderTbPicker(); renderManualMatches(); renderCoverage();
-  setStatus('Submissions extracted'); go('mapping');
+  setStatus('Submissions extracted'); go('defaultmap');
 }
 // a plain `window.location = url` download works in a normal browser tab,
 // but Dataiku serves this webapp inside a sandboxed iframe, where top-level
@@ -336,8 +338,8 @@ async function extractSubs(){
 // click works inside a sandboxed iframe as long as downloads are allowed at
 // all, and — unlike a raw navigation — lets an error response show up as a
 // proper toast instead of navigating the whole app to a page of raw JSON.
-async function downloadFile(path,fallbackName){
-  const res=await fetch(backendUrl(path));
+async function downloadFile(path,fallbackName,opts){
+  const res=await fetch(backendUrl(path),opts);
   if(!res.ok){
     let msg=`Download failed (status ${res.status})`;
     try{ const data=await res.json(); if(data&&data.error) msg=data.error; }catch(e){}
@@ -355,6 +357,85 @@ async function downloadFile(path,fallbackName){
 async function downloadSubmissions(){
   if(!state.session){toast('No active session yet');return}
   await downloadFile('/api/submissions/export?session_id='+encodeURIComponent(state.session),'Submissions_Simplified.xlsx');
+}
+
+/* ---------------- Default Mapping: every rule, per file, with its variance ---------------- */
+
+const DM_STATUS={MATCH:'Match',MATCH_WITHIN_TOLERANCE:'Match (within tolerance)',REVIEW_REQUIRED:'Variance - review',NOT_FOUND:'Not found'};
+function dmPct(v){ return v==null?'':(v.toLocaleString(undefined,{maximumFractionDigits:4})+'%'); }
+function dmFileSheets(file){ const f=state.subFilesMeta.find(x=>x.file===file); return new Set((f?f.sheets:[]).map(s=>s.sheet)); }
+function dmRulesFor(file,all){
+  const sheets=dmFileSheets(file);
+  return all.filter(r=>(r.files||[]).includes(file)||(!(r.files||[]).length&&(r.target_sheets||[]).some(s=>sheets.has(s))));
+}
+function dmSummary(rs){
+  const s={rules:rs.length,MATCH:0,MATCH_WITHIN_TOLERANCE:0,REVIEW_REQUIRED:0,NOT_FOUND:0,abs:0};
+  rs.forEach(r=>{ s[r.status]++; if(r.status==='REVIEW_REQUIRED'||r.status==='MATCH_WITHIN_TOLERANCE') s.abs+=Math.abs(r.variance); });
+  return s;
+}
+function dmChips(s){
+  return [`${s.rules} rules`,`${s.MATCH+s.MATCH_WITHIN_TOLERANCE} matched`,`${s.REVIEW_REQUIRED} with a variance to review`,`${s.NOT_FOUND} not found`]
+    .map(c=>`<span class="chip">${esc(c)}</span>`).join('');
+}
+function renderDefault(){
+  const j=state.defaultRun, box=$('dmFiles'); if(!box) return;
+  const ready=!!(j&&j.ok);
+  $('dmPrereq').style.display=ready?'none':'block';
+  $('dmBody').style.display=ready?'block':'none';
+  if(j&&!j.ok){ $('dmPrereq').style.display='block'; $('dmPrereq').textContent=j.error||'The default mapping could not be run.'; return; }
+  if(!ready){ box.innerHTML=''; return; }
+  const all=j.results, s=j.summary;
+  $('dmKpis').innerHTML=[['Rules applied',s.rules,''],['Match',s.MATCH,''],['Match (within tolerance)',s.MATCH_WITHIN_TOLERANCE,''],
+      ['Variance - review',s.REVIEW_REQUIRED,s.REVIEW_REQUIRED?' bad':''],['Not found',s.NOT_FOUND,'']]
+    .map(([l,v,c])=>`<div class="kpi dmKpi${c}"><small>${esc(l)}</small><b>${esc(v)}</b></div>`).join('');
+  const nf=all.filter(r=>r.status==='NOT_FOUND').length;
+  const note=$('dmNote');
+  note.style.display=s.REVIEW_REQUIRED?'block':'none';
+  note.textContent=`Total absolute variance on rules that matched with a difference: ${fmt(s.abs_variance)}. Variance = Trial Balance amount - submission amount.`;
+  const q=($('dmFilter').value||'').toLowerCase(), st=$('dmStatus').value;
+  const keep=r=>(!st||r.status===st)&&(!q||(r.label+' '+r.rule_text+' '+r.where+' '+(r.files||[]).join(' ')).toLowerCase().includes(q));
+  const rowsHtml=rs=>rs.filter(keep).map(r=>`<tr class="${r.status==='REVIEW_REQUIRED'?'dmReview':''}">
+      <td>${r.color?`<span class="swatch" style="background:#${esc(r.color)}"></span>`:''}</td><td>${esc(r.n)}</td>
+      <td data-tr="1"><b>${esc(r.label)}</b> <span class="muted">${esc(ccyLabel(r.currency))}</span></td><td class="how">${esc(r.rule_text)}</td>
+      <td class="num">${esc(fmt(r.tb_amount))}</td><td class="num">${esc(fmt(r.sub_amount))}</td>
+      <td class="num ${r.status==='REVIEW_REQUIRED'?'bad':''}">${esc(fmt(r.variance))}</td><td class="num">${esc(dmPct(r.variance_pct))}</td>
+      <td><span class="pill ${r.status}">${esc(DM_STATUS[r.status])}</span></td>
+      <td>${esc(r.where||'(not found)')}${(r.warnings||[]).length?`<div class="muted">${esc(r.warnings.slice(0,2).join(' | '))}</div>`:''}</td></tr>`).join('');
+  const head='<thead><tr><th></th><th>#</th><th>Rule</th><th>How the rule works</th><th>TB amount</th><th>Submission amount</th><th>Variance</th><th>Variance %</th><th>Status</th><th>Where in the file</th></tr></thead>';
+  const empty='<div class="muted" style="padding:8px 2px">No rules for this filter.</div>';
+  let out=state.subFilesMeta.map(f=>{
+    const rs=dmRulesFor(f.file,all); if(!rs.length) return '';
+    const sm=dmSummary(rs), body=rowsHtml(rs);
+    return `<div class="depthCard"><div class="depthCardHead"><div><b>${esc(f.file)}</b> <span class="chip">${esc((DEPTH_TYPES.find(t=>t[0]===state.fileTypes[f.file])||[0,''])[1])}</span></div>
+      <button type="button" class="primary" data-action="dm-download" data-file="${esc(f.file)}">Download annotated workbook</button></div>
+      <div>${dmChips(sm)}${sm.REVIEW_REQUIRED||sm.MATCH_WITHIN_TOLERANCE?`<span class="chip">${esc('Total absolute variance '+fmt(sm.abs))}</span>`:''}</div>
+      ${body?`<div class="depthScroll"><table class="dmTable">${head}<tbody>${body}</tbody></table></div>`:empty}</div>`;
+  }).join('');
+  const shown=new Set(); state.subFilesMeta.forEach(f=>dmRulesFor(f.file,all).forEach(r=>shown.add(r.n)));
+  const orphan=all.filter(r=>!shown.has(r.n));
+  if(orphan.length){
+    const body=rowsHtml(orphan);
+    out+=`<div class="depthCard"><div class="depthCardHead"><div><b>Rules that apply to none of the uploaded files</b></div></div>
+      ${body?`<div class="depthScroll"><table class="dmTable">${head}<tbody>${body}</tbody></table></div>`:empty}</div>`;
+  }
+  box.innerHTML=out||'<div class="muted">No rules to show.</div>';
+  $('btnDmAll').style.display=j.files&&j.files.some(f=>f.summary.rules>0)?'inline-flex':'none';
+}
+async function rerunDefault(){
+  const num=(id,def)=>{const v=parseFloat($(id).value); return isNaN(v)?def:v};
+  setStatus('Re-running the default mapping');
+  const j=await api('/api/default/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    session_id:state.session,tolerance_abs:num('dmTolAbs',1),tolerance_pct:num('dmTolPct',0.01)/100})});
+  state.defaultRun=j; renderDefault();
+  setStatus(`Default mapping: ${j.summary.REVIEW_REQUIRED} variance(s) to review`);
+}
+function downloadDefaultPdf(){
+  const manual=state.manualMatches.filter(m=>(m.source||'MANUAL')!=='DEFAULT').map(m=>({label:m.label,bs_mapping:m.bs_mapping,currency:m.currency,
+    source:m.source||'MANUAL',tb_components:(m.tb_components||[]).map(c=>({amount:c.amount,sign:c.sign})),
+    components:(m.components||[]).map(c=>({amount:c.amount,sign:c.sign,multiplier:c.multiplier}))}));
+  const approved=(state.suggestions||[]).map((s,i)=>!!state.suggestionDecisions[i]);
+  return downloadFile('/api/default/pdf','Default_Mapping_Results.pdf',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:state.session,manual_matches:manual,approved})});
 }
 
 /* ---------------- Depth Search: TB pivot values -> every non-zero cell, every sheet ---------------- */
@@ -836,6 +917,7 @@ function renderManualMatches(){
           <div class="muted" style="margin-top:6px">Total: <b>${esc(fmt(subSum))}</b></div>
         </div>
       </div>
+      ${noEvidence?'':`<div class="matchVariance"><span class="muted">Variance (TB - submission):</span> <b class="${status==='REVIEW_REQUIRED'?'bad':'good'}">${esc(fmt(diff))}</b>${Math.abs(tbSum)>1e-9?` <span class="muted">(${esc(dmPct(diff/Math.abs(tbSum)*100))})</span>`:''}</div>`}
       ${m.warnings&&m.warnings.length?`<div class="matchWarnings">${m.warnings.map(w=>`<div>⚠ ${esc(w)}</div>`).join('')}</div>`:''}
     </div>`}).join('') || '<div class="notice">No manual matches yet — build one above or load a saved mapping file.</div>';
 }
@@ -1006,6 +1088,10 @@ const CLICK_ACTIONS={
   'extract-subs':(el)=>guarded(el,extractSubs),
   'download-submissions':(el)=>guarded(el,downloadSubmissions),
   'run-depth':(el)=>guarded(el,runDepth),
+  'dm-rerun':(el)=>guarded(el,rerunDefault),
+  'dm-pdf':(el)=>guarded(el,downloadDefaultPdf),
+  'dm-download':(el)=>guarded(el,()=>downloadFile('/api/default/download?session_id='+encodeURIComponent(state.session)+'&file='+encodeURIComponent(el.dataset.file),'DefaultMapping.xlsx')),
+  'dm-download-all':(el)=>guarded(el,()=>downloadFile('/api/default/download-all?session_id='+encodeURIComponent(state.session),'Default_Mapping_Outputs.zip')),
   'set-lang':(el)=>setLang(el.dataset.lang),
   'choose-dict':()=>$('dictFile').click(),
   'proceed-lang':(el)=>guarded(el,proceedLang),
@@ -1073,6 +1159,7 @@ document.addEventListener('click',e=>{
 
 document.addEventListener('change',e=>{
   const el=e.target;
+  if(el.id==='dmStatus'){ renderDefault(); return; }
   if(el.dataset.action==='toggle-sheet'){
     state.selection[el.dataset.file][el.dataset.sheet].checked=el.checked; return;
   }
@@ -1110,6 +1197,7 @@ document.addEventListener('input',e=>{
   if(e.target.id==='subPickerSearch') renderSubPicker();
   if(e.target.id==='coverageSearch') renderCoverageTable();
   if(e.target.id==='depthFilter') renderDepthResults();
+  if(e.target.id==='dmFilter') renderDefault();
 });
 
 /* ---------------- Interface language: English <-> Arabic ----------------
@@ -1491,7 +1579,34 @@ const AR_DICT={
 "Distinct values": "القيم المميزة",
 "Step 3 · Off-balance": "الخطوة 3 · خارج الميزانية",
 "Off-balance pivots (optional)": "جداول خارج الميزانية المحورية (اختياري)",
-"Optional: upload it after the Trial Balance and before the submissions. It is used only to reconcile the Off-balance (064) submission. The raw-data sheet and header row are found automatically, Equ-IQD is cleaned and validated, and two pivots are built. Depth Search then looks for their values in the Off-balance submission only, with the Bucket pivot searched on its Maturity sheet only.": "اختياري: ارفعه بعد ميزان المراجعة وقبل التقارير المقدّمة. يُستخدم فقط لتسوية تقرير خارج الميزانية (064). تُكتشف ورقة البيانات الخام وصف العناوين تلقائيًا، وتُنظَّف قيمة المكافئ بالدينار العراقي وتُراجع، ويُبنى جدولان محوريان. ثم يبحث البحث المتعمق عن قيمهما في تقرير خارج الميزانية فقط، ويُبحث في الجدول المحوري للفترات في ورقة الاستحقاق فقط."
+"Optional: upload it after the Trial Balance and before the submissions. It is used only to reconcile the Off-balance (064) submission. The raw-data sheet and header row are found automatically, Equ-IQD is cleaned and validated, and two pivots are built. Depth Search then looks for their values in the Off-balance submission only, with the Bucket pivot searched on its Maturity sheet only.": "اختياري: ارفعه بعد ميزان المراجعة وقبل التقارير المقدّمة. يُستخدم فقط لتسوية تقرير خارج الميزانية (064). تُكتشف ورقة البيانات الخام وصف العناوين تلقائيًا، وتُنظَّف قيمة المكافئ بالدينار العراقي وتُراجع، ويُبنى جدولان محوريان. ثم يبحث البحث المتعمق عن قيمهما في تقرير خارج الميزانية فقط، ويُبحث في الجدول المحوري للفترات في ورقة الاستحقاق فقط.",
+"Default Mapping": "الربط الافتراضي",
+"Rules": "القواعد",
+"The bundled mapping is applied to the Trial Balance and every submission file as soon as the submissions are extracted. Each file gets its own workbook — your original sheets, the TB pivot and accounts, a report that states each rule, the Trial Balance and submission amounts and the variance, and the matched cells highlighted in one colour on both sides. The same results can be downloaded as a PDF.": "يُطبَّق الربط المدمج على ميزان المراجعة وعلى كل ملف مقدَّم فور استخراج التقارير. يحصل كل ملف على مصنفه الخاص: أوراقك الأصلية، والجدول المحوري للحسابات، وتقرير يوضح كل قاعدة ومبالغ ميزان المراجعة والتقرير المقدَّم والفرق، مع تمييز الخلايا المطابقة بلون واحد على الجانبين. ويمكن تنزيل النتائج نفسها بصيغة PDF.",
+"Upload the Trial Balance, then upload and extract the submission workbooks (Submissions step). The default mapping runs automatically.": "ارفع ميزان المراجعة، ثم ارفع مصنفات التقارير المقدَّمة واستخرجها (خطوة التقارير المقدَّمة). يعمل الربط الافتراضي تلقائيًا.",
+"Tolerance (% of the TB amount)": "التفاوت (% من مبلغ ميزان المراجعة)",
+"Re-run with these tolerances": "إعادة التشغيل بهذه التفاوتات",
+"Download PDF (all results)": "تنزيل PDF (كل النتائج)",
+"Download all workbooks (zip)": "تنزيل كل المصنفات (zip)",
+"Filter rules (name, how it works, sheet, cell…)": "تصفية القواعد (الاسم، طريقة العمل، الورقة، الخلية…)",
+"All statuses": "كل الحالات",
+"Variance - review": "فرق - يتطلب مراجعة",
+"Match (within tolerance)": "مطابق (ضمن التفاوت)",
+"Match": "مطابق",
+"Not found": "غير موجود",
+"Rules applied": "القواعد المطبقة",
+"How the rule works": "طريقة عمل القاعدة",
+"Variance": "الفرق",
+"Where in the file": "الموضع في الملف",
+"(not found)": "(غير موجود)",
+"Rules that apply to none of the uploaded files": "قواعد لا تنطبق على أي من الملفات المرفوعة",
+"No rules for this filter.": "لا توجد قواعد لهذه التصفية.",
+"No rules to show.": "لا توجد قواعد للعرض.",
+"Variance (TB - submission):": "الفرق (ميزان المراجعة - التقرير المقدَّم):",
+"Re-running the default mapping": "جارٍ إعادة تشغيل الربط الافتراضي",
+"Process the submissions first.": "عالج التقارير المقدَّمة أولًا.",
+"That file is not part of this session.": "هذا الملف ليس ضمن هذه الجلسة.",
+"No submission file has a default-mapping result.": "لا يوجد ملف مقدَّم له نتيجة ربط افتراضي."
 };
 const AR_RULES=[
 [
@@ -1785,6 +1900,34 @@ const AR_RULES=[
 [
 "^Searched: (\\d+) OB- Trial Balance values \\+ (\\d+) Outstanding Report values$",
 "تم البحث عن: {1} قيمة OB- من ميزان المراجعة + {2} قيمة من تقرير الأرصدة القائمة"
+],
+[
+"^(\\d+) rules$",
+"{1} قاعدة"
+],
+[
+"^(\\d+) matched$",
+"{1} مطابقة"
+],
+[
+"^(\\d+) with a variance to review$",
+"{1} بفرق يتطلب مراجعة"
+],
+[
+"^(\\d+) not found$",
+"{1} غير موجودة"
+],
+[
+"^Total absolute variance ([\\d,.\\-]+)$",
+"إجمالي الفرق المطلق {1}"
+],
+[
+"^Total absolute variance on rules that matched with a difference: (.+)\\. Variance = Trial Balance amount - submission amount\\.$",
+"إجمالي الفرق المطلق للقواعد التي طابقت بوجود فرق: {1}. الفرق = مبلغ ميزان المراجعة - مبلغ التقرير المقدَّم."
+],
+[
+"^Default mapping: (\\d+) variance\\(s\\) to review$",
+"الربط الافتراضي: {1} فرق (فروق) تتطلب مراجعة"
 ]
 ].map(([src,tpl])=>[new RegExp(src),tpl]);
 const I18N_ATTRS=['placeholder','title','aria-label'];

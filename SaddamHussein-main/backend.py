@@ -24,6 +24,12 @@ try:
 except Exception as _e:
     OR=None; OR_ERROR=str(_e)
 
+try:
+    from bahrain_iraq_algorithm import default_report as DR
+    DR_ERROR=None
+except Exception as _e:
+    DR=None; DR_ERROR=str(_e)
+
 SESSIONS={}
 
 def get_session(sid=None):
@@ -137,23 +143,10 @@ def submissions_extract():
     # of reconciliation by default — no manual upload needed. Every attempted
     # rule is recorded (fulfilled or not, and why) so coverage is fully
     # visible rather than collapsed into a single skipped-count.
-    default_matches=[]; coverage=[]
+    default_matches=[]; coverage=[]; default_payload=None
+    d['default_run']=None
     if d['tb'] is not None and len(d['sub_df']):
-        templates=eng.load_default_mapping()
-        for tpl in templates:
-            resolved,warnings=eng.resolve_rule_template(tpl,d['tb'],d['sub_df'])
-            tb_n=len(resolved.get('tb_components') or []); sub_n=len(resolved.get('components') or [])
-            fulfilled=tb_n>0 and sub_n>0
-            entry={'label':resolved.get('label'),'currency':resolved.get('currency'),'rule_type':resolved.get('rule_type'),
-                   'fulfilled':fulfilled,'tb_found':tb_n>0,'sub_found':sub_n>0,
-                   'tb_accounts':tb_n,'sub_lines':sub_n,'warnings':warnings,'reconciled_status':None}
-            if fulfilled:
-                resolved['source']='DEFAULT'
-                default_matches.append({'resolved':resolved,'warnings':warnings})
-                entry['tb_amount']=sum(c['amount']*c.get('sign',1) for c in resolved['tb_components'])
-                entry['submission_amount']=sum(c['amount']*c.get('sign',1)*c.get('multiplier',1) for c in resolved['components'])
-                entry['difference']=entry['tb_amount']-entry['submission_amount']
-            coverage.append(entry)
+        default_matches,coverage,default_payload=_run_default(d,eng)
     d['mapping_coverage']=coverage
 
     preview=d['sub_df'].copy()
@@ -170,7 +163,7 @@ def submissions_extract():
     # is a safety net against a truly pathological file, not a real limit.
     return jsonify({'ok':True,'count':len(d['sub_df']),'preview':json.loads(preview.head(20000).to_json(orient='records')),
                     'suggestions':d['suggestions'],'default_mapping_matches':default_matches,
-                    'mapping_coverage':coverage,'mapping_coverage_summary':summary})
+                    'mapping_coverage':coverage,'mapping_coverage_summary':summary,'default_results':default_payload})
 
 @app.route('/api/submissions/search-amount',methods=['POST','OPTIONS'])
 def submissions_search_amount():
@@ -193,6 +186,131 @@ def submissions_export():
     eng.export_submissions(d['sub_df'],path)
     return xlsx_response(path,'Submissions_Simplified.xlsx')
 
+def _strip_placeholders(resolved):
+    r=dict(resolved)
+    r['tb_components']=[c for c in (resolved.get('tb_components') or []) if not c.get('placeholder')]
+    r['components']=[c for c in (resolved.get('components') or []) if not c.get('placeholder')]
+    return r
+
+def _run_default(d,eng):
+    """Run the bundled default mapping. Returns (matches for the Mapping Studio, coverage rows, payload for the page)."""
+    matches=[]; coverage=[]
+    if DR is None:
+        # an older library without default_report: fall back to the plain loop so the rest of the app keeps working
+        for tpl in eng.load_default_mapping():
+            resolved,warnings=eng.resolve_rule_template(tpl,d['tb'],d['sub_df'])
+            tb_n=len(resolved.get('tb_components') or []); sub_n=len(resolved.get('components') or [])
+            ok=tb_n>0 and sub_n>0
+            e={'label':resolved.get('label'),'currency':resolved.get('currency'),'rule_type':resolved.get('rule_type'),
+               'fulfilled':ok,'tb_found':tb_n>0,'sub_found':sub_n>0,'tb_accounts':tb_n,'sub_lines':sub_n,'warnings':warnings,'reconciled_status':None}
+            if ok:
+                resolved['source']='DEFAULT'; matches.append({'resolved':resolved,'warnings':warnings})
+                e['tb_amount']=sum(c['amount']*c.get('sign',1) for c in resolved['tb_components'])
+                e['submission_amount']=sum(c['amount']*c.get('sign',1)*c.get('multiplier',1) for c in resolved['components'])
+                e['difference']=e['tb_amount']-e['submission_amount']
+            coverage.append(e)
+        return matches,coverage,{'ok':False,'error':'The default-mapping report needs the latest bahrain_iraq_algorithm library '
+                                 '(copy default_report.py, pdf_simple.py and engine.py into it, then restart the backend). Detail: %s'%DR_ERROR}
+    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'])
+    d['default_run']=run
+    for r in run['results']:
+        resolved=_strip_placeholders(r['resolved'])
+        ok=r['n_tb']>0 and r['n_sub']>0
+        e={'label':r['label'],'currency':r['currency'],'rule_type':r['rule_type'],'fulfilled':ok,'tb_found':r['n_tb']>0,
+           'sub_found':r['n_sub']>0,'tb_accounts':r['n_tb'],'sub_lines':r['n_sub'],'warnings':r['warnings'],'reconciled_status':None,
+           'default_status':r['status'],'variance':r['variance']}
+        if ok:
+            resolved['source']='DEFAULT'; matches.append({'resolved':resolved,'warnings':r['warnings']})
+            e['tb_amount']=r['tb_amount']; e['submission_amount']=r['sub_amount']; e['difference']=r['variance']
+        coverage.append(e)
+    return matches,coverage,_default_payload(d,run)
+
+def _default_payload(d,run):
+    files=[]
+    for entry in d['sub_files']:
+        sheets=[s['sheet'] for s in d['sub_inspect'].get(entry['label'],[])]
+        mine=DR._results_for_file(run['results'],entry['label'],sheets)
+        files.append({'file':entry['label'],'summary':DR.summarise(mine),'rules':[r['n'] for r in mine]})
+    return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files}
+
+def _dm_unavailable():
+    return jsonify({'ok':False,'error':'The default-mapping report needs the latest bahrain_iraq_algorithm library in your project '
+                    '(copy default_report.py, pdf_simple.py and engine.py into it, then restart the backend). Detail: %s'%DR_ERROR}),400
+
+def _dm_ready(d):
+    if d.get('tb') is None: return jsonify({'ok':False,'error':'Upload and process the Trial Balance first.'}),400
+    if d.get('sub_df') is None or not len(d['sub_df']): return jsonify({'ok':False,'error':'Process the submissions first.'}),400
+    return None
+
+@app.route('/api/default/run',methods=['POST','OPTIONS'])
+def default_run():
+    if DR is None: return _dm_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    bad=_dm_ready(d)
+    if bad: return bad
+    eng=ReconEngine(float(body.get('tolerance_abs',1)),float(body.get('tolerance_pct',0.0001)))
+    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'])
+    d['default_run']=run
+    return jsonify(_default_payload(d,run))
+
+@app.route('/api/default/results',methods=['GET'])
+def default_results():
+    if DR is None: return _dm_unavailable()
+    _,d=get_session(request.args.get('session_id'))
+    if not d.get('default_run'): return jsonify({'ok':False,'error':'Process the submissions first.'}),400
+    return jsonify(_default_payload(d,d['default_run']))
+
+def _dm_out_path(d,label):
+    ext='.xlsm' if label.lower().endswith('.xlsm') else '.xlsx'
+    safe=''.join(ch if ch.isalnum() or ch in '-_.' else '_' for ch in Path(label).stem)
+    return os.path.join(d['dir'],'default_'+safe+ext), safe+'_DefaultMapping'+ext
+
+@app.route('/api/default/download',methods=['GET'])
+def default_download():
+    if DR is None: return _dm_unavailable()
+    _,d=get_session(request.args.get('session_id')); label=request.args.get('file','')
+    run=d.get('default_run')
+    if not run: return jsonify({'ok':False,'error':'Process the submissions first.'}),400
+    src=next((x for x in d['sub_files'] if x['label']==label),None)
+    if not src: return jsonify({'ok':False,'error':'That file is not part of this session.'}),400
+    out,name=_dm_out_path(d,label)
+    DR.write_default_workbook(src['path'],out,label,d['tb'],run)
+    with open(out,'rb') as fh: data=fh.read()
+    return bytes_response(data,name,_depth_mime(out))
+
+@app.route('/api/default/download-all',methods=['GET'])
+def default_download_all():
+    if DR is None: return _dm_unavailable()
+    _,d=get_session(request.args.get('session_id'))
+    run=d.get('default_run')
+    if not run: return jsonify({'ok':False,'error':'Process the submissions first.'}),400
+    entries=[]
+    for src in d['sub_files']:
+        if not any(c.get('submission_file')==src['label'] for r in run['results'] for c in r['components']): continue
+        out,name=_dm_out_path(d,src['label'])
+        DR.write_default_workbook(src['path'],out,src['label'],d['tb'],run)
+        entries.append((name,out))
+    if not entries: return jsonify({'ok':False,'error':'No submission file has a default-mapping result.'}),400
+    return bytes_response(DR.build_zip(entries),'Default_Mapping_Outputs.zip','application/zip')
+
+@app.route('/api/default/pdf',methods=['POST','OPTIONS'])
+def default_pdf():
+    if DR is None: return _dm_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    _,d=get_session(body.get('session_id'))
+    run=d.get('default_run')
+    if not run: return jsonify({'ok':False,'error':'Process the submissions first.'}),400
+    files=[]
+    for entry in d['sub_files']:
+        sheets=[x['sheet'] for x in d['sub_inspect'].get(entry['label'],[])]
+        files.append({'file':entry['label'],'sheets':sheets,
+                      'type_label':next((f.get('type_label','') for f in ((d.get('depth') or {}).get('files') or []) if f['file']==entry['label']),'')})
+    tb_name=Path(d['tb_path']).name.split('_',1)[-1] if d.get('tb_path') else ''
+    data=DR.build_pdf(run,files=files,tb_name=tb_name,suggestions=d.get('suggestions') or [],
+                      approved=body.get('approved'),manual_matches=body.get('manual_matches') or [])
+    return bytes_response(data,'Default_Mapping_Results.pdf','application/pdf')
+
 @app.route('/api/rules/resolve',methods=['POST','OPTIONS'])
 def rules_resolve():
     body=request.get_json(force=True,silent=True) or {}
@@ -202,6 +320,7 @@ def rules_resolve():
     templates=body.get('templates',[])
     if not templates:return jsonify({'ok':False,'error':'The uploaded mapping file has no matches in it.'}),400
     eng=ReconEngine(); out=[]
+    if DR is not None: templates=DR.expand_templates(templates,d['tb'],d['sub_df'])
     for t in templates:
         resolved,warnings=eng.resolve_rule_template(t,d['tb'],d['sub_df'])
         out.append({'resolved':resolved,'warnings':warnings})

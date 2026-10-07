@@ -99,6 +99,8 @@ def match_currency_name(text):
             if pat.search(n): return code
     return None
 
+FOREIGN_HEADER_PATTERN = re.compile(r"foreign\s+currenc|foreign\s+exchange|\bforex\b|\bfx\b", re.I)
+FOREIGN_HEADER_PATTERN_AR = re.compile(r"عملات?\s+(?:ال)?اجنبيه|(?:ال)?عمله\s+(?:ال)?اجنبيه|صرف\s+(?:ال)?اجنبي")
 TOTAL_PATTERN = re.compile(r"\b(grand\s+total|sub\s*-?\s*total|total)\b|(?:ال)?مجموع|(?:ال)?[اأإ]جمال[يى]|الكلي", re.I)
 # a column-index / cross-reference row some regulatory templates print under
 # the real header — e.g. "2=(3+4+5+6)" — reads as plausible-looking small
@@ -166,6 +168,10 @@ def classify_currency_header(text):
         code = match_currency_name(t)
     if not code and (LOCAL_CCY_PATTERN.search(t) or re.search(r"العمله\s+المحليه", tn)):
         code = "LCY"
+    # "Foreign Currency Accounts Converted to Iraqi Dinars" names the dinar only because the amounts are
+    # expressed in it - the column holds FOREIGN currency balances (FRX), not IQD
+    if (FOREIGN_HEADER_PATTERN.search(t) or FOREIGN_HEADER_PATTERN_AR.search(tn)) and code in (None, "LCY", LOCAL_CCY):
+        code = FRX_CODE
     if is_total and code:
         return f"TOTAL_{code}"
     if is_total:
@@ -741,7 +747,17 @@ class ReconEngine:
         warnings=[]
         tb_components=[]
         used_tb_rows=set()
+        tb_marks=[]
+        seen_group_rows=set()
         for item in template.get('tb_side',[]) or []:
+            if item.get('level')=='group':
+                gcomps,gwarn,gmarks=self._resolve_group_item(item,tb)
+                for c in gcomps:
+                    k=(c['account'],c['account_desc'],c['bs_mapping'],c['currency'],c.get('_rule_id'))
+                    if k in seen_group_rows: continue
+                    seen_group_rows.add(k); tb_components.append(c)
+                warnings.extend(gwarn); tb_marks.extend(gmarks)
+                continue
             acct=str(item.get('account') or '').strip()
             desc=str(item.get('account_desc') or '').strip()
             bsmap=item.get('bs_mapping')
@@ -836,7 +852,11 @@ class ReconEngine:
                     # line on some other, unrelated sheet.
                     warnings.append(f"Submission item not found: sheet {sheet!r} was not included in this extraction — {text!r}")
                     continue
-            if ccy and len(pool):
+            cell_mode=bool(col_ctx) or item.get('aggregate')=='cell'          # legacy / explicit: one specific cell
+            # does this sheet identify its currency columns at all? If so, a row with nothing in the item's currency
+            # is a real zero; only a sheet whose columns carry no currency (UNSPECIFIED) falls back to every cell
+            sheet_has_ccy=bool(ccy) and len(pool)>0 and bool((pool.currency!='UNSPECIFIED').any())
+            if cell_mode and ccy and len(pool):
                 p2=pool[pool.currency==ccy]
                 if len(p2): pool=p2
             if want_total and len(pool):
@@ -845,36 +865,47 @@ class ReconEngine:
             if not len(pool):
                 warnings.append(f"Submission item not found (no candidate rows): {text!r}")
                 continue
-            # when several columns share the same currency (e.g. "IQD
-            # Residents" vs "IQD Non-Residents"), the line description alone
-            # can't tell them apart — blend in column-context similarity
-            # whenever the template actually carries one.
             scored=[]
-            for idx,row in pool.iterrows():
-                sc=text_similarity(text,row.line_description)
-                if col_ctx:
-                    ctx_sc=text_similarity(col_ctx,row.get('column_context','') or '')
-                    sc=0.5*sc+0.5*ctx_sc
-                scored.append((sc,idx))
+            if cell_mode:
+                # when several columns share the same currency (e.g. "IQD Residents" vs "IQD Non-Residents"), the
+                # line description alone can't tell them apart — blend in column-context similarity.
+                for idx,row in pool.iterrows():
+                    sc=text_similarity(text,row.line_description)
+                    if col_ctx:
+                        ctx_sc=text_similarity(col_ctx,row.get('column_context','') or '')
+                        sc=0.5*sc+0.5*ctx_sc
+                    scored.append((sc,[idx]))
+            else:
+                # a line is a ROW of the sheet. The row is found by its description; its value is then the sum of
+                # the row's cells in the item's currency (IQD sits in two columns - Residents + Non-Residents - and
+                # foreign currency in two more). A row with nothing in that currency counts as zero.
+                units={}
+                for idx,row in pool.iterrows():
+                    sc=text_similarity(text,row.line_description)
+                    key=(row.submission_file,row.sheet,int(row.row_number))
+                    u=units.setdefault(key,[sc,[]]); u[1].append(idx); u[0]=max(u[0],sc)
+                scored=[(v[0],v[1]) for v in units.values()]
             scored.sort(key=lambda x:-x[0])   # stable: ties keep sheet order
             best_score=scored[0][0] if scored else 0.0
             if best_score<0.5:
                 warnings.append(f"Submission item low-confidence match, please review: {text!r} (best match score {best_score:.2f})")
                 continue
-            # every line that carries (essentially) the same description is a
-            # "hit"; if there is more than one, the amount decides below.
-            cands=[(sc,idx) for sc,idx in scored if sc>=best_score-0.05][:12]
-            pending.append({'text':text,'sign':item.get('sign',1),'cands':cands})
+            # every line that carries (essentially) the same description is a "hit"; if there is more than one,
+            # the amount decides below.
+            cands=[(sc,idxs) for sc,idxs in scored if sc>=best_score-0.05][:12]
+            def restrict(idxs,ccy=ccy,has=sheet_has_ccy,cell_mode=cell_mode):
+                if cell_mode or not ccy or not has: return list(idxs)
+                return [i for i in idxs if submissions.loc[i,'currency']==ccy]
+            pending.append({'text':text,'sign':item.get('sign',1),'cands':cands,'restrict':restrict,'ccy':ccy})
 
         # --- several lines share a description? pick by amount, not by position ---
-        # The submission side only knows a *description*, and the same label often
-        # recurs (other sections, other sheets). The TB side already has a real
-        # amount, so choose the hit (or combination of hits, when the mapping has
-        # several submission items) whose amount equals the TB amount — exactly
-        # at face value first, then allowing a thousands/millions scale and/or an
-        # opposite sign.
+        # The submission side only knows a *description*, and the same label often recurs (other sections, other
+        # sheets). The TB side already has a real amount, so choose the hit (or combination of hits, when the mapping
+        # has several submission items) whose amount equals the TB amount — exactly at face value first, then allowing
+        # a thousands/millions scale and/or an opposite sign.
         tb_target=sum(c['amount']*c.get('sign',1) for c in tb_components)
         tol=max(self.tolerance_abs,abs(tb_target)*self.tolerance_pct)
+        usum=lambda p,idxs: sum(float(submissions.loc[i,'normalized_amount']) for i in p['restrict'](idxs))*p['sign']
         picks=[p['cands'][0] for p in pending]
         amb=[i for i,p in enumerate(pending) if len(p['cands'])>1]
         by_amount=False
@@ -882,12 +913,10 @@ class ReconEngine:
             n_combos=1
             for i in amb: n_combos*=len(pending[i]['cands'])
             if n_combos<=20000:
-                fixed=sum(float(submissions.loc[p['cands'][0][1],'normalized_amount'])*p['sign']
-                          for i,p in enumerate(pending) if i not in amb)
+                fixed=sum(usum(p,p['cands'][0][1]) for i,p in enumerate(pending) if i not in amb)
                 best=None
                 for combo in itertools.product(*[pending[i]['cands'] for i in amb]):
-                    tot=fixed+sum(float(submissions.loc[idx,'normalized_amount'])*pending[i]['sign']
-                                  for i,(sc,idx) in zip(amb,combo))
+                    tot=fixed+sum(usum(pending[i],idxs) for i,(sc,idxs) in zip(amb,combo))
                     if abs(tb_target-tot)<=tol: rank,diff=0,abs(tb_target-tot)
                     else:
                         fit=self.best_scale_fit(tot,tb_target,self.tolerance_abs,self.tolerance_pct)
@@ -899,20 +928,29 @@ class ReconEngine:
                     by_amount=True
                     for i,cnd in zip(amb,best[1]): picks[i]=cnd
         for i in amb:
-            p=pending[i]; r=submissions.loc[picks[i][1]]
+            p=pending[i]; r=submissions.loc[picks[i][1][0]]
+            cells='+'.join(str(submissions.loc[j,'source_cell']) for j in p['restrict'](picks[i][1])) or '(blank)'
             if by_amount:
-                warnings.append(f"{len(p['cands'])} submission lines match {p['text']!r}; picked {r.sheet}!{r.source_cell} "
+                warnings.append(f"{len(p['cands'])} submission lines match {p['text']!r}; picked {r.sheet}!{cells} "
                                 f"because its amount agrees with the Trial Balance amount.")
             else:
                 warnings.append(f"{len(p['cands'])} submission lines match {p['text']!r} and none agrees with the Trial Balance "
-                                f"amount; took {r.sheet}!{r.source_cell} (best name match) — please review.")
-        for p,(sc,idx) in zip(pending,picks):
-            row=submissions.loc[idx]
-            sub_components.append({'submission_file':row.submission_file,'sheet':row.sheet,'row_number':int(row.row_number),
-                                    'source_cell':row.source_cell,'line_description':row.line_description,'currency':row.currency,
-                                    'amount':float(row.normalized_amount),'multiplier':1,'sign':p['sign'],
-                                    'match_confidence':round(sc,3)})
+                                f"amount; took {r.sheet}!{cells} (best name match) — please review.")
+        for p,(sc,idxs) in zip(pending,picks):
+            cells=p['restrict'](idxs)
+            if not cells:                        # the row exists but holds nothing in this currency: a real zero
+                row=submissions.loc[idxs[0]]
+                sub_components.append({'submission_file':row.submission_file,'sheet':row.sheet,'row_number':int(row.row_number),
+                                        'source_cell':'(blank)','line_description':row.line_description,'currency':p['ccy'],
+                                        'amount':0.0,'multiplier':1,'sign':p['sign'],'match_confidence':round(sc,3),'placeholder':True})
+            for idx in cells:
+                row=submissions.loc[idx]
+                sub_components.append({'submission_file':row.submission_file,'sheet':row.sheet,'row_number':int(row.row_number),
+                                        'source_cell':row.source_cell,'line_description':row.line_description,'currency':row.currency,
+                                        'amount':float(row.normalized_amount),'multiplier':1,'sign':p['sign'],
+                                        'match_confidence':round(sc,3)})
             if sc<0.85:
+                row=submissions.loc[idxs[0]]
                 warnings.append(f"Submission item matched with moderate confidence ({sc:.2f}): {p['text']!r} → {row.line_description!r}")
 
         # the new period's submission file might not carry the same reporting
@@ -935,9 +973,12 @@ class ReconEngine:
                     warnings.append("Submission values didn't reconcile at face value; applied "
                                     + " and ".join(parts) + " automatically — please double-check.")
 
+        for c in tb_components:                    # account-level items (not produced by a group rule)
+            if not c.get('group_rule'):
+                tb_marks.append(['acct',c['bs_mapping'],str(c['account']),str(c['account_desc']),c['currency']])
         resolved={'bs_mapping':template.get('label') or 'Imported match','label':template.get('label'),
                   'currency':template.get('currency','TOTAL'),'rule_type':template.get('rule_type','MANUAL_CLUB'),
-                  'source':'IMPORTED','tb_components':tb_components,'components':sub_components}
+                  'source':'IMPORTED','tb_components':tb_components,'components':sub_components,'tb_marks':tb_marks}
         # the same missing account can surface once per currency-tagged row
         # it was expected under (e.g. a "Non-Residents" bucket combining one
         # account across five FX currencies) — de-dupe so the report reads
@@ -947,6 +988,59 @@ class ReconEngine:
             if w in seen: continue
             seen.add(w); deduped.append(w)
         return resolved, deduped
+
+    def _resolve_group_item(self, item, tb):
+        """A BS-mapping GROUP rule: everything the TB pivot holds for the group, whatever the account
+        numbers or descriptions are, optionally narrowed by currency, by sign of the account balance, and by
+        words in the account description. Item fields: bs_mapping, currency (IQD / USD / ... / FRX = every
+        non-IQD / TOTAL = all), exclude_currencies, sign_filter (positive|negative), include_desc, exclude_desc.
+        The amounts are summed from the TB each time, so a new account in the group is picked up automatically.
+        Returns (components, warnings, marks). The group always yields at least one (possibly zero) component, so a
+        genuinely empty group shows up as a variance instead of as a missing item."""
+        bsm=str(item.get('bs_mapping') or '').strip(); ccy=str(item.get('currency') or 'TOTAL').strip()
+        warnings=[]; sign=item.get('sign',1)
+        allrows=tb[tb.bs_mapping.astype(str).str.strip()==bsm]
+        if not len(allrows):
+            allrows=tb[tb.bs_mapping.astype(str).str.strip().str.lower()==bsm.lower()]
+        if not len(allrows):
+            warnings.append(f"BS mapping group {bsm!r} is not in this Trial Balance - treated as zero.")
+        rows=allrows
+        if ccy==FRX_CODE: rows=rows[rows.tran_ccy!=LOCAL_CCY]
+        elif ccy!='TOTAL': rows=rows[rows.tran_ccy==(LOCAL_CCY if ccy in ('IQD','LCY') else ccy)]
+        excl=[c for c in (item.get('exclude_currencies') or [])]
+        if excl: rows=rows[~rows.tran_ccy.isin(excl)]
+        g=rows.groupby(['account','account_desc','tran_ccy','bs_mapping'],dropna=False)['adjusted_balance'].sum().reset_index()
+        def rx(words): return '|'.join(words) if words else None
+        inc=rx(item.get('include_desc')); exc=rx(item.get('exclude_desc'))
+        if inc: g=g[g.account_desc.astype(str).str.contains(inc,regex=True,case=False,na=False)]
+        if exc: g=g[~g.account_desc.astype(str).str.contains(exc,regex=True,case=False,na=False)]
+        sf=item.get('sign_filter')
+        if sf=='positive': g=g[g.adjusted_balance>0]
+        elif sf=='negative': g=g[g.adjusted_balance<0]
+        rid='%s|%s|%s|%s|%s|%s'%(bsm,ccy,sf,inc,exc,','.join(excl))
+        comps=[]
+        if ccy==FRX_CODE:
+            fold={}
+            for r in g.itertuples():
+                k=(r.account,r.account_desc,r.bs_mapping)
+                c=fold.get(k)
+                if c is None:
+                    c={'account':r.account,'account_desc':r.account_desc,'bs_mapping':r.bs_mapping,'currency':FRX_CODE,'amount':0.0,
+                       'sign':sign,'breakdown':{},'group_rule':True,'_rule_id':rid}
+                    fold[k]=c; comps.append(c)
+                c['amount']+=float(r.adjusted_balance); c['breakdown'][str(r.tran_ccy)]=c['breakdown'].get(str(r.tran_ccy),0.0)+float(r.adjusted_balance)
+        else:
+            for r in g.itertuples():
+                comps.append({'account':r.account,'account_desc':r.account_desc,'bs_mapping':r.bs_mapping,'currency':str(r.tran_ccy),
+                              'amount':float(r.adjusted_balance),'sign':sign,'group_rule':True,'_rule_id':rid})
+        if not comps:
+            comps.append({'account':'(group total)','account_desc':'%s - %s'%(bsm,ccy),'bs_mapping':bsm,'currency':ccy,'amount':0.0,
+                          'sign':sign,'group_rule':True,'placeholder':True,'_rule_id':rid})
+        plain=not (inc or exc or sf or excl)
+        key=FRX_CODE if ccy==FRX_CODE else ('TOTAL' if ccy=='TOTAL' else (LOCAL_CCY if ccy in ('IQD','LCY') else ccy))
+        if plain: marks=[['pivot',bsm,key]]
+        else: marks=[['acct',c['bs_mapping'],str(c['account']),str(c['account_desc']),c['currency']] for c in comps if not c.get('placeholder')]
+        return comps,warnings,marks
 
     # ---------- Lineage ----------
 
