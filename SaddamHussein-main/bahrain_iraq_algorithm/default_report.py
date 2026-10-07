@@ -349,7 +349,7 @@ def _bucket_columns(buckets, sheet_cols, total_letter):
     return pair, dict(cols + open_cols), note
 
 
-def ob_templates(res, sub, notes):
+def ob_templates(res, sub, notes, include_tb_ob=False):
     """Concrete rules for the off-balance sheets, from the processed Outstanding Report `res`.
     Returns (rules, pivots for the workbook)."""
     names = _ob_sheet_names(sub)
@@ -364,18 +364,28 @@ def ob_templates(res, sub, notes):
     except Exception:
         notes.append("The off-balance checks need the latest outstanding_report.py in the library.")
         return [], None
-    df = res["df"]
-    d = df[df["_STATUS"] == "ok"].copy()
-    for c in ("CATEGORY", "LC_GTEE_DESC", "BILL_CCY", "BUCKET"):
-        d[c] = d[c].fillna(BLANK)
-    d2 = d                                                                     # Pivot 1 has no CATEGORY and no filter
+    # the rows behind each ACTIVE pivot (automatic, saved definition or the one the user approved): Pivot 1 feeds the main and
+    # by-currency sheets, Pivot 2 the maturity sheet and the category rows
+    def prep(frame):
+        f = frame.copy()
+        for c in ("CATEGORY", "LC_GTEE_DESC", "BILL_CCY", "BUCKET"):
+            f[c] = f[c].fillna(BLANK)
+        return f
+
+    base_df = res["df"][res["df"]["_STATUS"] == "ok"]
+    d1 = prep(res["data1"] if res.get("data1") is not None else base_df)
+    d2 = prep(res["data2"] if res.get("data2") is not None else base_df)
     p2cols = list(res["pivot1"]["flat"]["columns"])                            # currency columns (Pivot 1)
     p1cols = list(res["pivot2"]["flat"]["columns"])                            # bucket columns (Pivot 2)
     ccys = [c for c in p2cols if c != GRAND]
     total_name = "Total Off-Balance Sheet Accounts"
-    items = [("total", total_name)]
-    items += [("category", c) for c in order_pivot_columns(list(d["CATEGORY"].unique()), "currency") if c != BLANK]
-    items += [("lc", x) for x in order_pivot_columns(list(d["LC_GTEE_DESC"].unique()), "currency") if x != BLANK]
+    cats = [c for c in order_pivot_columns(list(d2["CATEGORY"].unique()), "currency") if c not in (BLANK, "(all)")]
+
+    def item_list(lc_src):
+        return ([("total", total_name)] + [("category", c) for c in cats] +
+                [("lc", x) for x in order_pivot_columns(list(lc_src["LC_GTEE_DESC"].unique()), "currency") if x != BLANK])
+
+    items_main, items_mat = item_list(d1), item_list(d2)
 
     def rows_of(src, kind, name):
         if kind == "category":
@@ -406,8 +416,8 @@ def ob_templates(res, sub, notes):
         has_iqd_col = "IQD" in sc
         direct = [c for c in sorted(sc) if c not in ("TOTAL", "IQD", FRX_CODE, "UNSPECIFIED") and not str(c).startswith("TOTAL_")]
         other_col = FRX_CODE in sc
-    for kind, name in items:
-        rows = rows_of(d if kind in ("total", "category") else d2, kind, name)
+    for kind, name in items_main:
+        rows = rows_of(d2 if kind == "category" else d1, kind, name)
         iq = float(rows[rows["BILL_CCY"] == LOCAL_CCY]["EQUI_IQD"].sum())
         fx = float(rows[rows["BILL_CCY"] != LOCAL_CCY]["EQUI_IQD"].sum())
         tt = float(rows["EQUI_IQD"].sum())
@@ -435,13 +445,22 @@ def ob_templates(res, sub, notes):
         pair, header_of, note = _bucket_columns(buckets, cols, total_letter)
         if note:
             notes.append(note)
-        for kind, name in items:
-            rows = rows_of(d, kind, name)
+        for kind, name in items_mat:
+            rows = rows_of(d2, kind, name)
             if total_letter:
                 rule("maturity total", "TOTAL", kind, name, float(rows["EQUI_IQD"].sum()), names["maturity"], None, 1, [GRAND], total_letter)
             for b, L in pair.items():
                 rule("bucket %s (column %s, %s)" % (b, L, header_of.get(L, "")), "TOTAL", kind, name,
                      float(rows[rows["BUCKET"] == b]["EQUI_IQD"].sum()), names["maturity"], None, 1, [b], L)
+    # OPTIONAL (off by default - the Trial Balance and the Outstanding Report are different sources): every OB- group of
+    # the Trial Balance against the grand total of the off-balance sheets, in case the Outstanding Report is in doubt
+    if include_tb_ob and names["main"]:
+        for ccy, what, sub_ccy in (("IQD", "IQD (column 3 or 4)", "IQD"), (FRX_CODE, "foreign currencies (column 5 or 6)", FRX_CODE),
+                                   ("TOTAL", "total (column 2)", "TOTAL")):
+            out.append({"label": "Trial Balance OB- groups vs off-balance total - %s" % what, "currency": ccy, "rule_type": "GROUP_RULE",
+                        "_expanded": True, "derived": True, "ob": True,
+                        "tb_side": [grp("OB-*", ccy)],
+                        "submission_side": [{"match_text": total_name, "sheet": names["main"], "currency": sub_ccy, "is_total": False, "sign": 1}]})
     return out, {"pivot1": res["pivot1"]["flat"], "pivot2": res["pivot2"]["flat"]}
 
 
@@ -457,12 +476,12 @@ def _cells_text(components):
     return "; ".join("%s!%s" % (sh, "+".join(cells)) for (f, sh), cells in by.items())
 
 
-def run_default_mapping(eng, tb, sub, templates=None, outstanding=None):
+def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=False):
     templates = templates if templates is not None else eng.load_default_mapping()
     skipped = []
     concrete = expand_templates(templates, tb, sub, skipped)
     ob_notes = []
-    ob_rules, ob_pivots = ob_templates(outstanding, sub, ob_notes)
+    ob_rules, ob_pivots = ob_templates(outstanding, sub, ob_notes, include_tb_ob=ob_tb)
     concrete = list(concrete) + ob_rules
     scale_of = {}
     if sub is not None and len(sub):
@@ -536,9 +555,10 @@ def group_coverage(tb, results):
     t["_g"] = t.bs_mapping.astype(str).str.strip()
     for g, grp_ in t.groupby("_g", sort=True):
         local = grp_.tran_ccy == LOCAL_CCY
+        is_ob = g.upper().startswith("OB")
         out.append({"group": g if g else "(blank)", "iqd": float(grp_[local].adjusted_balance.sum()),
                     "frx": float(grp_[~local].adjusted_balance.sum()), "total": float(grp_.adjusted_balance.sum()),
-                    "rules": sorted(by.get(g, [])), "covered": bool(by.get(g))})
+                    "rules": sorted(by.get(g, [])), "covered": bool(by.get(g)) or is_ob, "off_balance": is_ob and not by.get(g)})
     return out
 
 

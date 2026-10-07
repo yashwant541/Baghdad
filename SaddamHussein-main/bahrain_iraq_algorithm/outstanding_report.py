@@ -10,12 +10,15 @@ both pivots carry grand totals that are reconciled to the cleaned source.
 
 Python 3.9 compatible.
 """
+import datetime
+import json
 import math
+import os
 import re
 
 import numpy as np
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -395,62 +398,300 @@ def build_lcgtee_currency_pivot(df):
 
 # ------------------------------------------------------------------------------ driver
 
+ROLE_STD = {"category": "CATEGORY", "item": "LC_GTEE_DESC", "currency": "BILL_CCY", "bucket": "BUCKET", "amount": "EQUI_IQD"}
+DEFINITION_FILE = "pivot_definition.json"
+
+
+def definition_path():
+    """Where the saved pivot definition lives: next to this module in the library (override: BAHRAIN_IRAQ_PIVOT_DEFINITION)."""
+    return os.environ.get("BAHRAIN_IRAQ_PIVOT_DEFINITION") or os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFINITION_FILE)
+
+
+def load_definition():
+    """The saved definition (dict) or None."""
+    try:
+        with open(definition_path(), encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) and d.get("pivot1") and d.get("pivot2") else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_definition(spec):
+    """Write the definition into the library. Raises OSError when the folder is read-only."""
+    doc = {"format": "bahrain-iraq-outstanding-pivots", "version": 1, "saved": datetime.datetime.now().isoformat(timespec="seconds"),
+           "sheet": spec.get("sheet"), "header_row": spec.get("header_row"), "pivot1": spec["pivot1"], "pivot2": spec["pivot2"]}
+    path = definition_path()
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=False, indent=1)
+    return path
+
+
+def delete_definition():
+    try:
+        os.remove(definition_path())
+        return True
+    except OSError:
+        return False
+
+
+def _blank_cell(v):
+    return v is None or (isinstance(v, float) and math.isnan(v)) or str(v).strip() == ""
+
+
+def _is_num(v):
+    return isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool) and math.isfinite(float(v))
+
+
+def _unique_labels(row_values):
+    labels, used = [], {}
+    for j, v in enumerate(row_values):
+        label, _ = normalize_header(v)
+        label = label or "Unnamed %d" % (j + 1)
+        if label in used:
+            used[label] += 1
+            label = "%s.%d" % (label, used[label])
+        else:
+            used[label] = 0
+        labels.append(label)
+    return labels
+
+
+def _guess_header(raw):
+    head = detect_header_row(raw)
+    if head:
+        return head["row"]
+    best, bn = 0, -1
+    for i in range(min(20, len(raw))):
+        n = sum(1 for v in raw.iloc[i].tolist() if not _blank_cell(v))
+        if n > bn:
+            best, bn = i, n
+    return best
+
+
+def _read_raw(path, sheet):
+    # keep_default_na=False: pandas would otherwise turn the text "N/A" / "NA" / "null" into an empty cell
+    return pd.ExcelFile(path, engine="openpyxl").parse(sheet, header=None, dtype=object, keep_default_na=False, na_values=[""])
+
+
+def read_sheet_table(path, sheet, header_row=None):
+    """Any sheet as a table: -> (DataFrame with the original column labels and a _SRC_ROW column, info)."""
+    xls = pd.ExcelFile(path, engine="openpyxl")
+    if sheet not in xls.sheet_names:
+        raise OutstandingError("Sheet %r was not found. Sheets: %s" % (sheet, ", ".join(xls.sheet_names)))
+    raw = _read_raw(path, sheet)
+    if not len(raw):
+        raise OutstandingError("Sheet %r is empty." % sheet)
+    hr = (int(header_row) - 1) if header_row else _guess_header(raw)
+    if hr < 0 or hr >= len(raw):
+        raise OutstandingError("Header row %s is outside sheet %r (%d rows)." % (header_row, sheet, len(raw)))
+    labels = _unique_labels(raw.iloc[hr].tolist())
+    df = raw.iloc[hr + 1:].copy()
+    df.columns = labels
+    df = df.reset_index(drop=True)
+    df["_SRC_ROW"] = [hr + 2 + i for i in range(len(df))]
+    return df, {"sheet": sheet, "header_row": hr + 1, "labels": labels}
+
+
+def list_sheets(path):
+    """Every sheet with the header row it would be read with and its columns (for the pivot builder)."""
+    xls = pd.ExcelFile(path, engine="openpyxl")
+    out = []
+    for name in xls.sheet_names:
+        raw = _read_raw(path, name)
+        if not len(raw):
+            out.append({"sheet": name, "header_row": 1, "columns": [], "rows": 0})
+            continue
+        hr = _guess_header(raw)
+        cols = [c for c in _unique_labels(raw.iloc[hr].tolist()) if not c.startswith("Unnamed ")]
+        out.append({"sheet": name, "header_row": hr + 1, "columns": cols, "rows": int(max(len(raw) - hr - 1, 0))})
+    return out
+
+
+def auto_spec(info):
+    """The automatic pivot definition, in terms of the columns that were detected."""
+    lab = lambda std: info["labels"][info["resolved"][std]]
+    return {"version": 1, "sheet": info["sheet"], "header_row": info["header_row"],
+            "pivot1": {"item": lab("LC_GTEE_DESC"), "currency": lab("BILL_CCY"), "amount": lab("EQUI_IQD")},
+            "pivot2": {"category": lab("CATEGORY"), "item": lab("LC_GTEE_DESC"), "currency": lab("BILL_CCY"),
+                       "bucket": lab("BUCKET"), "amount": lab("EQUI_IQD")}}
+
+
+def _find_label(labels, wanted, what):
+    if wanted is None or str(wanted).strip() == "":
+        raise OutstandingError("Choose the %s column." % what)
+    if wanted in labels:
+        return wanted
+    k = _key(wanted)
+    hits = [l for l in labels if _key(l) == k]
+    if hits:
+        return hits[0]
+    raise OutstandingError("The column %r (%s) is not in this sheet. Columns: %s" % (wanted, what, ", ".join(l for l in labels if not l.startswith("Unnamed "))))
+
+
+def _role_frame(raw, roles, constants=None):
+    """The pivot's source rows under the standard names. roles: STD name -> raw column label (or None)."""
+    d = pd.DataFrame({"_SRC_ROW": raw["_SRC_ROW"].values})
+    used = [lab for lab in roles.values() if lab]
+    keep = ~raw[used].apply(lambda r: all(_blank_cell(v) for v in r), axis=1).values
+    for std in ("CATEGORY", "BILL_CCY", "LC_GTEE_DESC", "BUCKET"):
+        lab = roles.get(std)
+        d[std] = raw[lab].values if lab else (constants or {}).get(std)
+    d["EQUI_IQD"] = raw[roles["EQUI_IQD"]].values
+    d = d[keep].reset_index(drop=True)
+    return clean_source_data(d)
+
+
+def _formulas_without_value(path, sheet, header_row, amount_label):
+    """How many cells of the amount column hold a formula that was never calculated (no saved value) - they read as empty."""
+    try:
+        wf = load_workbook(path, data_only=False, read_only=True)[sheet]
+        wv = load_workbook(path, data_only=True, read_only=True)[sheet]
+        hdr = next(wf.iter_rows(min_row=header_row, max_row=header_row, values_only=True))
+        labels = _unique_labels(list(hdr))
+        if amount_label not in labels:
+            return None
+        ix = labels.index(amount_label)
+        n = 0
+        for rf, rv in zip(wf.iter_rows(min_row=header_row + 1, values_only=True), wv.iter_rows(min_row=header_row + 1, values_only=True)):
+            f = rf[ix] if ix < len(rf) else None
+            v = rv[ix] if ix < len(rv) else None
+            if isinstance(f, str) and f.startswith("=") and v is None:
+                n += 1
+        return n
+    except Exception:
+        return None
+
+
+def _pivot_check(n, title, raw, roles, frame, pivot, path, info):
+    """What to look at before approving a pivot: its total against the raw column's Excel-style total, and every row left out."""
+    amount_label = roles["EQUI_IQD"]
+    raw_total = float(sum(float(v) for v in raw[amount_label] if _is_num(v)))
+    ok = frame[frame["_STATUS"] == "ok"]
+    texts = frame[frame["_STATUS"] == "invalid"]
+    blanks = frame[frame["_STATUS"] == "blank"]
+    like = [(r["_SRC_ROW"], loose_number(r["_EQUI_RAW"])) for r in texts.to_dict("records")]
+    like = [(row, v) for row, v in like if v is not None]
+    looked = dict(like)
+    ignored = []
+    for r in frame.to_dict("records"):
+        if r["_STATUS"] == "ok" and not r["_LOOKS_TOTAL"]:
+            continue
+        why = ("COUNTED: looks like a total line typed under the data" if r["_STATUS"] == "ok" else
+               "IGNORED: empty amount" if r["_STATUS"] == "blank" else
+               ("IGNORED: text that reads as the number %s" % format(looked[r["_SRC_ROW"]], ",.2f")) if r["_SRC_ROW"] in looked else
+               "IGNORED: text, not a number")
+        ignored.append({"row": int(r["_SRC_ROW"]), "value": None if r["_EQUI_RAW"] is None else str(r["_EQUI_RAW"]), "why": why})
+    label_cols = [(std, roles[std]) for std in ("CATEGORY", "LC_GTEE_DESC", "BILL_CCY", "BUCKET") if roles.get(std)]
+    return {"pivot": n, "title": title, "amount_column": amount_label,
+            "fields": dict((std, lab) for std, lab in roles.items() if lab),
+            "rows_read": int(len(frame)), "rows_summed": int(len(ok)), "ignored_empty": int(len(blanks)), "ignored_text": int(len(texts)),
+            "text_like_count": int(len(like)), "text_like_total": float(sum(v for _, v in like)),
+            "blank_labels": dict((lab, int(frame[std].isna().sum())) for std, lab in label_cols),
+            "raw_total": raw_total, "pivot_total": float(pivot["grand_total"]), "difference": float(pivot["grand_total"]) - raw_total,
+            "formulas_without_value": _formulas_without_value(path, info["sheet"], info["header_row"], amount_label) if path else None,
+            "ignored_rows": ignored[:60], "ignored_total": len(ignored)}
+
+
+def _exceptions(frame):
+    exc = frame[(frame["_STATUS"] != "ok") | frame["_LOOKS_TOTAL"]].copy()
+    like = dict((r["_SRC_ROW"], loose_number(r["_EQUI_RAW"])) for r in exc[exc["_STATUS"] == "invalid"].to_dict("records"))
+    exc["_WHY"] = [("COUNTED: looks like a total line typed under the data" if lt else
+                    "IGNORED: empty Equ-IQD" if st == "blank" else
+                    ("IGNORED: text that reads as the number %s" % format(like[sr], ",.2f")) if like.get(sr) is not None else
+                    "IGNORED: text, not a number") for st, lt, sr in zip(exc["_STATUS"], exc["_LOOKS_TOTAL"], exc["_SRC_ROW"])]
+    return exc
+
+
+def _assemble(path, raw_df, info, source_name, f1, f2, roles1, roles2, spec, status):
+    """Pivots + checks from the two prepared source frames (the automatic and the custom route share this)."""
+    validation = validate_source_data(f2, info, source_name)
+    p1 = build_lcgtee_currency_pivot(f1)                     # Pivot 1: rows LC/GTEE DESC, columns BILL_CCY
+    p2 = build_category_bucket_pivot(f2)                     # Pivot 2: rows CATEGORY > LC/GTEE DESC > BILL_CCY, columns Bucket
+    src_total = float(f2.loc[f2["_STATUS"] == "ok", "EQUI_IQD"].sum())
+    checks = [_pivot_check(1, "Pivot 1 - LC/GTEE by currency", raw_df, roles1, f1, p1, path, info),
+              _pivot_check(2, "Pivot 2 - category, LC/GTEE and currency by bucket", raw_df, roles2, f2, p2, path, info)]
+    warnings = []
+    for c in checks:
+        t = "Pivot %d" % c["pivot"]
+        if c["ignored_empty"] or c["ignored_text"]:
+            msg = "%s: %d row(s) have an empty amount and %d have text in it; they are not in the total (an Excel PivotTable ignores them too)" % (
+                t, c["ignored_empty"], c["ignored_text"])
+            if c["text_like_count"]:
+                msg += ", and %d of the text values read as numbers (%s in all)" % (c["text_like_count"], format(c["text_like_total"], ",.2f"))
+            warnings.append(msg + ".")
+        looks = sum(1 for r in c["ignored_rows"] if r["why"].startswith("COUNTED"))
+        if looks:
+            warnings.append("%s: %d row(s) look like a total line typed under the data (no labels, amount = the sum above). They ARE counted, as in an "
+                            "Excel PivotTable." % (t, looks))
+        if c["formulas_without_value"]:
+            warnings.append("%s: %d formula cell(s) in the amount column have no saved value (the file was never recalculated in Excel), so they are "
+                            "read as empty - open and save the file in Excel once, then upload it again." % (t, c["formulas_without_value"]))
+    texts2 = f2[f2["_STATUS"] == "invalid"]
+    like2 = [loose_number(v) for v in texts2["_EQUI_RAW"]]
+    like2 = [v for v in like2 if v is not None]
+    validation += [("Rows dropped as completely blank", int(info.get("blank_rows_removed", 0))),
+                   ("Excel-style total of the raw Equ-IQD column (numeric cells only)", checks[1]["raw_total"]),
+                   ("Equ-IQD cells ignored because they hold text", int(len(texts2))),
+                   ("of which read as numbers (not counted)", int(len(like2))),
+                   ("Amount those would add if they were counted", float(sum(like2))),
+                   ("Difference: pivot total - Excel-style total of the raw column", checks[1]["difference"]),
+                   ("Pivot 1 Grand Total", p1["grand_total"]), ("Pivot 2 Grand Total", p2["grand_total"]),
+                   ("Reconciliation difference (source - Pivot 1)", float(f1.loc[f1["_STATUS"] == "ok", "EQUI_IQD"].sum()) - p1["grand_total"]),
+                   ("Reconciliation difference (source - Pivot 2)", src_total - p2["grand_total"]),
+                   ("Warnings", "; ".join(warnings) or "none")]
+    return {"info": info, "df": f2, "data1": f1[f1["_STATUS"] == "ok"].copy(), "data2": f2[f2["_STATUS"] == "ok"].copy(),
+            "exceptions": _exceptions(f2), "excel_total": checks[1]["raw_total"], "pivot1": p1, "pivot2": p2,
+            "validation": validation, "warnings": warnings, "source_total": src_total, "checks": checks, "spec": spec, "status": status}
+
+
 def process_outstanding(path, source_name=None, sheet=None):
-    """Read -> standardise -> clean -> validate -> pivot -> reconcile. Raises OutstandingError with a
+    """Automatic pivots: read -> detect the sheet, header and the five fields -> pivot. Raises OutstandingError with a
     clear message rather than returning something silently wrong."""
     source_name = source_name or str(path)
     raw_df, info = read_source_data(path, sheet)
     info["rows_read"] = len(raw_df)
+    raw_all = raw_df.copy()
     df = standardize_columns(raw_df, info)
     if df.empty:
         raise OutstandingError("The raw-data sheet %r has no detail rows below its header." % info["sheet"])
     df = clean_source_data(df)
-    validation = validate_source_data(df, info, source_name)
-    p1 = build_lcgtee_currency_pivot(df)                     # Pivot 1: rows LC/GTEE DESC, columns BILL_CCY
-    p2 = build_category_bucket_pivot(df)                     # Pivot 2: rows CATEGORY > LC/GTEE DESC > BILL_CCY, columns Bucket
-    src_total = float(df.loc[df["_STATUS"] == "ok", "EQUI_IQD"].sum())
-    diff1, diff2 = src_total - p1["grand_total"], src_total - p2["grand_total"]
-    warnings = []
-    if abs(diff1) > 0.005 or abs(diff2) > 0.005:
-        warnings.append("Pivot grand totals do not agree with the cleaned source total (difference %s / %s)." %
-                        (format(diff1, ",.2f"), format(diff2, ",.2f")))
-    n_tot = int(df["_LOOKS_TOTAL"].sum())
-    if n_tot:
-        warnings.append("%d row(s) look like a total line typed under the data (no category, description, currency or bucket, and the amount equals "
-                        "the sum of the rows above). They ARE counted, as in an Excel PivotTable - see the Row_Exceptions sheet." % n_tot)
-    # what Excel itself gives for the raw Equ-IQD column: numbers are summed, empty cells and text are not
-    raw_col = info["labels"][info["resolved"]["EQUI_IQD"]]
-    is_num = lambda v: isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool) and math.isfinite(float(v))
-    excel_total = float(sum(float(v) for v in raw_df[raw_col] if is_num(v)))
-    diff_excel = src_total - excel_total
-    texts = df[df["_STATUS"] == "invalid"]
-    like = [(r["_SRC_ROW"], loose_number(r["_EQUI_RAW"])) for r in texts.to_dict("records")]
-    like = [(row, v) for row, v in like if v is not None]
-    like_total = float(sum(v for _, v in like))
-    n_blank = int((df["_STATUS"] == "blank").sum())
-    if len(texts) or n_blank:
-        msg = "%d row(s) have an empty Equ-IQD and %d have text in it; they are not in any total (an Excel PivotTable ignores them too)" % (n_blank, len(texts))
-        if like:
-            msg += ", and %d of the text values read as numbers (%s in all) - see the Row_Exceptions sheet" % (len(like), format(like_total, ",.2f"))
-        warnings.append(msg + ".")
-    exc = df[(df["_STATUS"] != "ok") | df["_LOOKS_TOTAL"]].copy()
-    looked = dict((row, v) for row, v in like)
-    exc["_WHY"] = [("COUNTED: looks like a total line typed under the data" if lt else
-                    "IGNORED: empty Equ-IQD" if st == "blank" else
-                    ("IGNORED: text that reads as the number %s" % format(looked[sr], ",.2f")) if sr in looked else "IGNORED: text, not a number")
-                   for st, lt, sr in zip(exc["_STATUS"], exc["_LOOKS_TOTAL"], exc["_SRC_ROW"])]
-    validation += [("Rows dropped as completely blank", int(info.get("blank_rows_removed", 0))),
-                   ("Excel-style total of the raw Equ-IQD column (numeric cells only)", excel_total),
-                   ("Equ-IQD cells ignored because they hold text", int(len(texts))),
-                   ("of which read as numbers (not counted)", int(len(like))),
-                   ("Amount those would add if they were counted", like_total),
-                   ("Difference: pivot total - Excel-style total of the raw column", diff_excel)]
-    validation += [("Pivot 1 Grand Total", p1["grand_total"]), ("Pivot 2 Grand Total", p2["grand_total"]),
-                   ("Reconciliation difference (source - Pivot 1)", diff1), ("Reconciliation difference (source - Pivot 2)", diff2),
-                   ("Warnings", "; ".join(warnings) or "none")]
-    return {"info": info, "df": df, "exceptions": exc, "excel_total": excel_total, "pivot1": p1, "pivot2": p2,
-            "validation": validation, "warnings": warnings,
-            "source_total": src_total}
+    spec = auto_spec(info)
+    auto_roles = {"CATEGORY": spec["pivot2"]["category"], "LC_GTEE_DESC": spec["pivot2"]["item"], "BILL_CCY": spec["pivot2"]["currency"],
+                  "BUCKET": spec["pivot2"]["bucket"], "EQUI_IQD": spec["pivot2"]["amount"]}
+    return _assemble(path, raw_all, info, source_name, df, df, auto_roles,
+                     {"LC_GTEE_DESC": spec["pivot1"]["item"], "BILL_CCY": spec["pivot1"]["currency"], "EQUI_IQD": spec["pivot1"]["amount"]},
+                     spec, "auto")
+
+
+def build_from_spec(path, spec, source_name=None, status="draft"):
+    """Pivots from a definition: sheet, header row and the column used for each role. spec =
+    {sheet, header_row, pivot1: {item, currency, amount}, pivot2: {category (optional), item, currency, bucket, amount}}."""
+    source_name = source_name or str(path)
+    sheet = spec.get("sheet")
+    if not sheet:
+        sheet = read_source_data(path)[1]["sheet"]
+    raw, info = read_sheet_table(path, sheet, spec.get("header_row"))
+    info["rows_read"] = len(raw)
+    labels = info["labels"]
+    p1s, p2s = spec.get("pivot1") or {}, spec.get("pivot2") or {}
+    roles1 = {"LC_GTEE_DESC": _find_label(labels, p1s.get("item"), "Pivot 1 item (LC/GTEE DESC)"),
+              "BILL_CCY": _find_label(labels, p1s.get("currency"), "Pivot 1 currency (BILL_CCY)"),
+              "EQUI_IQD": _find_label(labels, p1s.get("amount"), "Pivot 1 amount (Equ-IQD)")}
+    roles2 = {"CATEGORY": _find_label(labels, p2s.get("category"), "Pivot 2 category") if str(p2s.get("category") or "").strip() else None,
+              "LC_GTEE_DESC": _find_label(labels, p2s.get("item"), "Pivot 2 item (LC/GTEE DESC)"),
+              "BILL_CCY": _find_label(labels, p2s.get("currency"), "Pivot 2 currency (BILL_CCY)"),
+              "BUCKET": _find_label(labels, p2s.get("bucket"), "Pivot 2 bucket"),
+              "EQUI_IQD": _find_label(labels, p2s.get("amount"), "Pivot 2 amount (Equ-IQD)")}
+    f1 = _role_frame(raw, roles1)
+    f2 = _role_frame(raw, roles2, {"CATEGORY": "(all)"})
+    if not (f1["_STATUS"] == "ok").any() or not (f2["_STATUS"] == "ok").any():
+        raise OutstandingError("There are no numeric amounts in the chosen amount column(s) - check the sheet, the header row and the amount column.")
+    clean_spec = {"version": 1, "sheet": sheet, "header_row": info["header_row"],
+                  "pivot1": {"item": roles1["LC_GTEE_DESC"], "currency": roles1["BILL_CCY"], "amount": roles1["EQUI_IQD"]},
+                  "pivot2": {"category": roles2["CATEGORY"] or "", "item": roles2["LC_GTEE_DESC"], "currency": roles2["BILL_CCY"],
+                             "bucket": roles2["BUCKET"], "amount": roles2["EQUI_IQD"]}}
+    return _assemble(path, raw, info, source_name, f1, f2, roles1, roles2, clean_spec, status)
 
 
 # ------------------------------------------------------------------------------ depth-search hand-off

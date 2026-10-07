@@ -211,7 +211,8 @@ def _run_default(d,eng):
             coverage.append(e)
         return matches,coverage,{'ok':False,'error':'The default-mapping report needs the latest bahrain_iraq_algorithm library '
                                  '(copy default_report.py, pdf_simple.py and engine.py into it, then restart the backend). Detail: %s'%DR_ERROR}
-    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'))
+    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'),
+                               ob_tb=bool((d.get('default_opts') or {}).get('ob_tb')))
     d['default_run']=run
     for r in run['results']:
         if r.get('ob'): continue                 # off-balance checks live on the Default Mapping page, not in Mapping Studio
@@ -234,7 +235,9 @@ def _default_payload(d,run):
         sub=d.get('sub_df')
         read=sorted(set(sub[sub.submission_file==entry['label']].sheet)) if (sub is not None and len(sub)) else []
         files.append({'file':entry['label'],'summary':DR.summarise(mine),'rules':[r['n'] for r in mine],'sheets_read':read})
-    return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files,'groups':run.get('groups',[]),'notes':run.get('notes',[])}
+    return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files,'groups':run.get('groups',[]),'notes':run.get('notes',[]),
+            'options':{'ob_tb':bool((d.get('default_opts') or {}).get('ob_tb'))},
+            'ob_status':((d.get('outstanding') or {}).get('status'))}
 
 def _dm_unavailable():
     return jsonify({'ok':False,'error':'The default-mapping report needs the latest bahrain_iraq_algorithm library in your project '
@@ -253,7 +256,9 @@ def default_run():
     bad=_dm_ready(d)
     if bad: return bad
     eng=ReconEngine(float(body.get('tolerance_abs',1)),float(body.get('tolerance_pct',0.0001)))
-    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'))
+    if 'ob_tb' in body: d['default_opts']={'ob_tb':bool(body.get('ob_tb'))}
+    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'),
+                               ob_tb=bool((d.get('default_opts') or {}).get('ob_tb')))
     d['default_run']=run
     return jsonify(_default_payload(d,run))
 
@@ -399,7 +404,8 @@ def depth_run():
     ps=body.get('params') or {}
     params={'min_value':float(ps.get('min_value',1000)),'min_scaled':float(ps.get('min_scaled',100000)),
             'tol_abs':float(ps.get('tol_abs',1)),'allow_scale':bool(ps.get('allow_scale',True)),
-            'allow_sign':bool(ps.get('allow_sign',True)),'include_accounts':bool(ps.get('include_accounts',False))}
+            'allow_sign':bool(ps.get('allow_sign',True)),'include_accounts':bool(ps.get('include_accounts',False)),
+            'include_tb_ob':bool(ps.get('include_tb_ob',False))}
     if ps.get('maturity_keywords'): params['maturity_keywords']=str(ps['maturity_keywords'])
     externals=OR.depth_specs(d['outstanding']['result']) if (OR is not None and d.get('outstanding')) else None
     res=DS.run_depth_search(d['tb'],d['sub_files'],body.get('file_types') or {},params,externals=externals)
@@ -520,15 +526,22 @@ def _ob_unavailable():
     return jsonify({'ok':False,'error':'The Outstanding Report needs the latest bahrain_iraq_algorithm library in your project '
                     '(copy outstanding_report.py and engine.py into it, then restart the backend). Detail: %s'%OR_ERROR}),400
 
-def _ob_payload(d):
-    ob=d['outstanding']; res=ob['result']
-    def flat(f):
-        return {'title':f['title'],'label_cols':f['label_cols'],'columns':f['columns'],'category':f.get('category'),
-                'rows':[{'level':r['level'],'labels':r['labels'],'values':r['values'],'total':r['total']} for r in f['rows']]}
-    return {'ok':True,'source':ob['name'],'sheet':res['info']['sheet'],'header_row':res['info']['header_row'],
-            'warnings':res['warnings'],
+def _flat(f):
+    return {'title':f['title'],'label_cols':f['label_cols'],'columns':f['columns'],'category':f.get('category'),
+            'rows':[{'level':r['level'],'labels':r['labels'],'values':r['values'],'total':r['total']} for r in f['rows']]}
+
+def _ob_result_payload(res,name,status):
+    return {'ok':True,'source':name,'sheet':res['info']['sheet'],'header_row':res['info']['header_row'],'warnings':res['warnings'],
             'validation':[[k,v if isinstance(v,(int,float)) else str(v)] for k,v in res['validation']],
-            'pivot1':flat(res['pivot1']['flat']),'pivot2':flat(res['pivot2']['flat'])}
+            'pivot1':_flat(res['pivot1']['flat']),'pivot2':_flat(res['pivot2']['flat']),'checks':res['checks'],'spec':res['spec'],'status':status}
+
+def _ob_payload(d):
+    """The ACTIVE pivots (automatic, saved definition, or the one the user approved) plus what the pivot builder needs."""
+    ob=d['outstanding']
+    p=_ob_result_payload(ob['result'],ob['name'],ob.get('status','auto'))
+    p['saved']=bool(OR.load_definition()); p['sheets']=ob.get('sheets') or []; p['saved_error']=ob.get('saved_error')
+    p['definition_path']=OR.definition_path()
+    return p
 
 @app.route('/api/outstanding/upload',methods=['POST','OPTIONS'])
 def outstanding_upload():
@@ -544,8 +557,91 @@ def outstanding_upload():
         res=OR.process_outstanding(path,name,sheet=request.form.get('sheet') or None)
     except OR.OutstandingError as exc:
         return jsonify({'ok':False,'error':str(exc)}),400
-    d['outstanding']={'path':path,'name':name,'result':res}; d['depth']=None
+    ob={'path':path,'name':name,'auto_result':res,'result':res,'status':'auto','draft':None,'saved_error':None}
+    try: ob['sheets']=OR.list_sheets(path)
+    except Exception: ob['sheets']=[]
+    saved=OR.load_definition()
+    if saved:                                  # a pivot definition saved in the library runs by itself on every new report
+        try:
+            ob['result']=OR.build_from_spec(path,saved,name,'saved'); ob['status']='saved'
+        except OR.OutstandingError as exc:
+            ob['saved_error']='The saved pivot definition could not be applied to this report (%s) - the automatic pivots are used instead.'%exc
+    d['outstanding']=ob; d['depth']=None
     return jsonify(_ob_payload(d))
+
+def _ob_need(d):
+    if not d.get('outstanding'): return jsonify({'ok':False,'error':'Upload the Outstanding Report first.'}),400
+    return None
+
+@app.route('/api/outstanding/build',methods=['POST','OPTIONS'])
+def outstanding_build():
+    """Pivot builder: build pivots from the sheet / header row / columns the user picked. A DRAFT only - it is not used
+    anywhere until it is approved."""
+    if OR is None: return _ob_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    bad=_ob_need(d)
+    if bad: return bad
+    ob=d['outstanding']
+    try: draft=OR.build_from_spec(ob['path'],body.get('spec') or {},ob['name'],'draft')
+    except OR.OutstandingError as exc: return jsonify({'ok':False,'error':str(exc)}),400
+    ob['draft']=draft
+    return jsonify({'ok':True,'draft':_ob_result_payload(draft,ob['name'],'draft')})
+
+@app.route('/api/outstanding/approve',methods=['POST','OPTIONS'])
+def outstanding_approve():
+    if OR is None: return _ob_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    bad=_ob_need(d)
+    if bad: return bad
+    ob=d['outstanding']
+    if not ob.get('draft'): return jsonify({'ok':False,'error':'Build the pivots first, check the totals, then approve.'}),400
+    ob['result']=ob['draft']; ob['result']['status']='approved'; ob['status']='approved'; ob['draft']=None; ob['saved_error']=None
+    d['depth']=None
+    return jsonify(_ob_payload(d))
+
+@app.route('/api/outstanding/auto',methods=['POST','OPTIONS'])
+def outstanding_auto():
+    """Go back to the automatically created pivots."""
+    if OR is None: return _ob_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    bad=_ob_need(d)
+    if bad: return bad
+    ob=d['outstanding']; ob['result']=ob['auto_result']; ob['status']='auto'; ob['draft']=None; d['depth']=None
+    return jsonify(_ob_payload(d))
+
+@app.route('/api/outstanding/save-definition',methods=['POST','OPTIONS'])
+def outstanding_save_definition():
+    """Save the ACTIVE pivot definition in the library (pivot_definition.json) so it runs automatically on every new report."""
+    if OR is None: return _ob_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id'))
+    bad=_ob_need(d)
+    if bad: return bad
+    spec=d['outstanding']['result']['spec']
+    try: path=OR.save_definition(spec)
+    except OSError as exc:
+        return jsonify({'ok':False,'error':'The library folder is not writable from here (%s). Download the definition and copy it into the bahrain_iraq_algorithm folder as %s.'%(exc,OR.DEFINITION_FILE),
+                        'definition':spec}),400
+    return jsonify({'ok':True,'path':path,'saved':True})
+
+@app.route('/api/outstanding/delete-definition',methods=['POST','OPTIONS'])
+def outstanding_delete_definition():
+    if OR is None: return _ob_unavailable()
+    return jsonify({'ok':True,'deleted':OR.delete_definition(),'saved':bool(OR.load_definition())})
+
+@app.route('/api/outstanding/definition',methods=['GET'])
+def outstanding_definition():
+    if OR is None: return _ob_unavailable()
+    _,d=get_session(request.args.get('session_id'))
+    bad=_ob_need(d)
+    if bad: return bad
+    spec=dict(d['outstanding']['result']['spec'])
+    doc={'format':'bahrain-iraq-outstanding-pivots','version':1,'sheet':spec.get('sheet'),'header_row':spec.get('header_row'),
+         'pivot1':spec['pivot1'],'pivot2':spec['pivot2']}
+    return bytes_response(json.dumps(doc,ensure_ascii=False,indent=1).encode('utf-8'),OR.DEFINITION_FILE,'application/json')
 
 @app.route('/api/outstanding/download',methods=['GET'])
 def outstanding_download():

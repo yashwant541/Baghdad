@@ -363,3 +363,19 @@ main{min-width:0}
 .matchVariance b.good{color:#0b7a58}
 #app[dir="rtl"] .dmTable th,#app[dir="rtl"] .dmTable td{text-align:right}
 #app[dir="rtl"] .dmTable td.num{text-align:left}
+
+/* ---------------- pivot builder ---------------- */
+.obBuilder{padding:6px 2px}
+.obBuilder h4{margin:16px 0 4px;font-size:14px}
+.obStatusRow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0}
+.obStatusRow .secondary,.obStatusRow .primary{padding:7px 12px;font-size:12.5px}
+.obCheck{margin:10px 0}
+.obCheck table{width:100%;max-width:760px;border-collapse:collapse;font-size:12.5px}
+.obCheck td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+.obCheck td:first-child{color:var(--muted);width:46%}
+.obCheck td.num{text-align:right;white-space:nowrap}
+.obCheck .good{color:#0b7a58;font-weight:700}
+.obCheck .bad{color:var(--danger);font-weight:700}
+.obCompare{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+.obCompare input{border:1px solid var(--line);border-radius:8px;padding:7px 10px;width:220px}
+#app[dir="rtl"] .obCheck td.num{text-align:left}

@@ -3,7 +3,7 @@
    through addEventListener + event delegation, and every network call goes
    through api() which never lets a non-JSON / error response fail silently. */
 
-let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',fileTypes:{},depth:null,defaultRun:null,workLang:null,outstanding:null,uiLang:'en',
+let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',fileTypes:{},depth:null,defaultRun:null,obDraft:null,workLang:null,outstanding:null,uiLang:'en',
   tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
   subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),subExtra:[],
   suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[],
@@ -211,8 +211,126 @@ async function uploadOutstanding(){
   const fd=new FormData(); fd.append('session_id',state.session); fd.append('file',f);
   setStatus('Building the Outstanding Report pivots');
   const j=await api('/api/outstanding/upload',{method:'POST',body:fd});
-  state.outstanding=j; state.depth=null; renderOutstanding(); renderDepthFiles(); renderDepthResults();
+  state.outstanding=j; state.obDraft=null; state.depth=null; renderOutstanding(); renderDepthFiles(); renderDepthResults();
   setStatus('Outstanding Report ready');
+}
+const OB_STATUS_TEXT={auto:'Automatic pivots',saved:'Saved pivot definition (from the library)',approved:'Approved custom pivots'};
+const OBB={p1Item:'obbP1Item',p1Ccy:'obbP1Ccy',p1Amt:'obbP1Amt',p2Cat:'obbP2Cat',p2Item:'obbP2Item',p2Ccy:'obbP2Ccy',p2Bucket:'obbP2Bucket',p2Amt:'obbP2Amt'};
+function obKey(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,''); }
+function obbSheetInfo(){ return ((state.outstanding||{}).sheets||[]).find(s=>s.sheet===$('obbSheet').value); }
+function obbFill(spec){
+  const j=state.outstanding; if(!j||!$('obbSheet')) return;
+  const sel=$('obbSheet');
+  if(spec||!sel.options.length){
+    sel.innerHTML=(j.sheets||[]).map(s=>`<option value="${esc(s.sheet)}">${esc(s.sheet)}</option>`).join('');
+    if(spec&&spec.sheet) sel.value=spec.sheet;
+  }
+  const sh=obbSheetInfo(); const cols=sh?sh.columns:[];
+  $('obbHeader').value=(spec&&spec.header_row)||(sh?sh.header_row:1);
+  const options=(blank)=>(blank?['<option value="">(none)</option>']:[]).concat(cols.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`)).join('');
+  const want=spec?{p1Item:spec.pivot1.item,p1Ccy:spec.pivot1.currency,p1Amt:spec.pivot1.amount,p2Cat:spec.pivot2.category,p2Item:spec.pivot2.item,
+                   p2Ccy:spec.pivot2.currency,p2Bucket:spec.pivot2.bucket,p2Amt:spec.pivot2.amount}:null;
+  const guess={p1Item:'lcgteedesc',p1Ccy:'billccy',p1Amt:'equiqd',p2Cat:'category',p2Item:'lcgteedesc',p2Ccy:'billccy',p2Bucket:'bucket',p2Amt:'equiqd'};
+  Object.keys(OBB).forEach(k=>{
+    const el=$(OBB[k]); const prev=want?want[k]:el.value;
+    el.innerHTML=options(k==='p2Cat');
+    const hit=cols.find(c=>c===prev)||cols.find(c=>obKey(c)===obKey(prev))||(!want&&cols.find(c=>obKey(c)===guess[k])||'');
+    el.value=hit||'';
+  });
+}
+function obbSpec(){
+  const v=id=>$(id).value;
+  return {sheet:v('obbSheet'),header_row:parseInt(v('obbHeader'),10)||null,
+    pivot1:{item:v(OBB.p1Item),currency:v(OBB.p1Ccy),amount:v(OBB.p1Amt)},
+    pivot2:{category:v(OBB.p2Cat),item:v(OBB.p2Item),currency:v(OBB.p2Ccy),bucket:v(OBB.p2Bucket),amount:v(OBB.p2Amt)}};
+}
+function obChecksHtml(checks){
+  return (checks||[]).map(c=>{
+    const ok=Math.abs(c.difference)<0.005;
+    const blanks=Object.entries(c.blank_labels||{}).map(([k,n])=>`${esc(k)}: ${esc(n)}`).join(' · ')||'-';
+    const ig=(c.ignored_rows||[]).map(r=>`<tr><td>${esc(r.row)}</td><td>${esc(r.value??'')}</td><td data-tr="1">${esc(r.why)}</td></tr>`).join('');
+    return `<div class="obCheck depthCard"><b data-tr="1">${esc(c.title)}</b>
+      <table><tbody>
+      <tr><td>Amount column</td><td class="num">${esc(c.amount_column)}</td></tr>
+      <tr><td>Rows read</td><td class="num">${esc(fmt(c.rows_read))}</td></tr>
+      <tr><td>Rows summed</td><td class="num">${esc(fmt(c.rows_summed))}</td></tr>
+      <tr><td>Rows ignored: empty amount / text</td><td class="num">${esc(c.ignored_empty)} / ${esc(c.ignored_text)}</td></tr>
+      <tr><td>Blank labels (shown as (blank))</td><td class="num">${blanks}</td></tr>
+      <tr><td>Excel SUM of the raw amount column</td><td class="num">${esc(fmt(c.raw_total))}</td></tr>
+      <tr><td>Pivot grand total</td><td class="num">${esc(fmt(c.pivot_total))}</td></tr>
+      <tr><td>Pivot - Excel SUM</td><td class="num ${ok?'good':'bad'}">${esc(fmt(ok?0:c.difference))}</td></tr>
+      </tbody></table>
+      ${c.formulas_without_value?`<div class="notice" style="margin-top:8px">${esc(c.formulas_without_value+' formula cell(s) in the amount column have no saved value, so they read as empty - open and save the file in Excel once, then upload it again.')}</div>`:''}
+      ${c.ignored_total?`<details><summary>${esc(c.ignored_total+' row(s) are not summed normally')}</summary><div class="depthScroll"><table class="depthTable" style="min-width:420px"><thead><tr><th>Sheet row</th><th>Value</th><th>What happens</th></tr></thead><tbody>${ig}</tbody></table></div></details>`:''}
+      </div>`;
+  }).join('');
+}
+function renderObStatus(){
+  const j=state.outstanding, box=$('obStatus'); if(!j||!box) return;
+  const st=j.status||'auto';
+  const btn=(a,t,cls)=>`<button type="button" class="${cls||'secondary'}" data-action="${a}">${esc(t)}</button>`;
+  box.innerHTML=`<div class="obStatusRow"><span class="chip" data-tr="1">${esc(OB_STATUS_TEXT[st]||st)}</span>
+    ${st!=='auto'?btn('ob-auto','Use the automatic pivots'):''}
+    ${st!=='saved'?btn('ob-save','Save these pivots as my default (library)'):''}
+    ${j.saved?btn('ob-delete-def','Delete the saved definition'):''}
+    ${btn('ob-def-download','Download the definition')}</div>`
+    +(j.saved&&st!=='saved'?'<div class="muted">A saved pivot definition exists in the library; it runs automatically on every new Outstanding Report.</div>':'')
+    +(j.saved_error?`<div class="notice">${esc(j.saved_error)}</div>`:'');
+}
+function renderObDraft(){
+  const d=state.obDraft, box=$('obDraft'); if(!box) return;
+  if(!d){ box.innerHTML=''; return; }
+  box.innerHTML=`<h4>Draft pivots - not used anywhere until you approve them</h4>
+    ${(d.warnings||[]).map(w=>`<div class="notice">${esc(w)}</div>`).join('')}
+    ${obChecksHtml(d.checks)}
+    <div class="obCompare"><label>Your own Excel total of the amount column (optional)<input id="obbExcel" type="text" inputmode="decimal" placeholder="e.g. 8494751773.48"></label>
+      <span id="obbExcelResult"></span></div>
+    <h3 class="subhead">Draft Pivot 1</h3><div class="tableWrap"><table id="obDraftPivot1"></table></div>
+    <h3 class="subhead">Draft Pivot 2</h3><div class="tableWrap"><table id="obDraftPivot2"></table></div>
+    <div class="actions"><button type="button" class="primary" data-action="ob-approve">Approve and use these pivots</button>
+      <button type="button" class="secondary" data-action="ob-discard">Discard the draft</button></div>`;
+  renderObTable('obDraftPivot1',d.pivot1); renderObTable('obDraftPivot2',d.pivot2);
+}
+function obCompareExcel(){
+  const d=state.obDraft, out=$('obbExcelResult'); if(!d||!out) return;
+  const raw=String($('obbExcel').value||'').replace(/[,\s]/g,''); if(raw===''){ out.textContent=''; return; }
+  const x=parseFloat(raw); if(isNaN(x)){ out.textContent='Not a number'; return; }
+  out.innerHTML=(d.checks||[]).map(c=>{ const diff=c.pivot_total-x; const ok=Math.abs(diff)<0.005;
+    return `<span class="${ok?'good':'bad'}">Pivot ${esc(c.pivot)} - your total: ${esc(fmt(ok?0:diff))}</span>`; }).join(' · ');
+}
+async function buildObPivots(){
+  const j=await api('/api/outstanding/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.session,spec:obbSpec()})});
+  state.obDraft=j.draft; renderObDraft(); setStatus('Draft pivots built - check the totals, then approve');
+}
+async function obAfterChange(j,msg){
+  state.outstanding=j; state.obDraft=null; state.depth=null;
+  renderOutstanding(); renderObDraft(); renderDepthFiles(); renderDepthResults();
+  if(state.defaultRun&&state.defaultRun.ok){ await rerunDefault(); }
+  if(msg) toast(msg);
+}
+async function approveObPivots(){
+  const j=await api('/api/outstanding/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.session})});
+  await obAfterChange(j,'Pivots approved - the off-balance checks and the depth search use them now');
+}
+async function useAutoObPivots(){
+  const j=await api('/api/outstanding/auto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.session})});
+  await obAfterChange(j,'Back to the automatic pivots');
+}
+async function saveObDefinition(){
+  const j=await api('/api/outstanding/save-definition',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.session})});
+  state.outstanding.saved=true; renderObStatus(); toast('Saved in the library: '+j.path+' - it runs automatically on the next Outstanding Report');
+}
+async function deleteObDefinition(){
+  await api('/api/outstanding/delete-definition',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.session})});
+  state.outstanding.saved=false; renderObStatus(); toast('Saved definition deleted');
+}
+function loadObDefinition(file){
+  const rd=new FileReader();
+  rd.onload=()=>{ try{
+      const d=JSON.parse(rd.result); if(!d.pivot1||!d.pivot2) throw new Error('not a pivot definition');
+      obbFill({sheet:d.sheet,header_row:d.header_row,pivot1:d.pivot1,pivot2:d.pivot2}); toast('Definition loaded - press Build pivots');
+    }catch(e){ toast('That file is not a pivot definition'); } };
+  rd.readAsText(file);
 }
 function obCell(v){
   if(typeof v!=='number') return esc(v);
@@ -243,6 +361,7 @@ function renderOutstanding(){
     ['Pivot - Excel SUM',val['Difference: pivot total - Excel-style total of the raw column']]]
     .map(([k,v])=>`<div class="kpi"><small>${esc(k)}</small><b>${esc(fmt(v))}</b></div>`).join('');
   renderObTable('obPivot1',j.pivot1); renderObTable('obPivot2',j.pivot2);
+  renderObStatus(); $('obChecks').innerHTML=obChecksHtml(j.checks); obbFill(j.spec);
   $('obValidation').innerHTML='<thead><tr><th>Check</th><th>Value</th></tr></thead><tbody>'+(j.validation||[]).map(([k,v])=>`<tr><td data-tr="1">${esc(k)}</td><td>${esc(typeof v==='number'?fmt(v):v)}</td></tr>`).join('')+'</tbody>';
   $('obBody').style.display='block'; $('btnOutstandingDl').style.display='inline-flex';
 }
@@ -379,6 +498,7 @@ function renderDefault(){
   if(j&&!j.ok){ $('dmPrereq').style.display='block'; $('dmPrereq').textContent=j.error||'The default mapping could not be run.'; return; }
   if(!ready){ box.innerHTML=''; return; }
   const all=j.results, s=j.summary;
+  $('dmObTb').checked=!!(j.options&&j.options.ob_tb);
   $('dmKpis').innerHTML=[['Rules applied',s.rules,''],['Match',s.MATCH,''],['Match (within tolerance)',s.MATCH_WITHIN_TOLERANCE,''],
       ['Variance - review',s.REVIEW_REQUIRED,s.REVIEW_REQUIRED?' bad':''],['Not found',s.NOT_FOUND,'']]
     .map(([l,v,c])=>`<div class="kpi dmKpi${c}"><small>${esc(l)}</small><b>${esc(v)}</b></div>`).join('');
@@ -415,17 +535,17 @@ function renderDefault(){
       ${body?`<div class="depthScroll"><table class="dmTable">${head}<tbody>${body}</tbody></table></div>`:empty}</div>`;
   }
   box.innerHTML=out||'<div class="muted">No rules to show.</div>';
-  $('dmNotes').innerHTML=(j.notes||[]).map(n=>`<div class="notice">${esc(n)}</div>`).join('');
+  $('dmNotes').innerHTML=(j.ob_status?`<div class="muted" style="margin:0 0 8px"><span>${esc('Off-balance pivots in use:')}</span> <span class="chip" data-tr="1">${esc(OB_STATUS_TEXT[j.ob_status]||j.ob_status)}</span></div>`:'')+(j.notes||[]).map(n=>`<div class="notice">${esc(n)}</div>`).join('');
   const gs=j.groups||[], open_=gs.filter(g=>!g.covered&&Math.abs(g.total)>1e-6);
   $('dmGroups').innerHTML=gs.length?`<details class="depthCard" ${open_.length?'open':''}><summary><b>Trial Balance groups and the rules that read them</b> <span class="chip">${esc(gs.length-open_.length+' of '+gs.length+' groups covered')}</span>${open_.length?`<span class="chip">${esc(open_.length+' group(s) with no rule')}</span>`:''}</summary>
-    <div class="depthScroll"><table class="dmTable" style="min-width:600px"><thead><tr><th>BS mapping group</th><th>IQD</th><th>Foreign currencies</th><th>Total</th><th>Rules that read it</th></tr></thead><tbody>${gs.map(g=>`<tr class="${g.covered?'':'dmReview'}"><td><b>${esc(g.group)}</b></td><td class="num">${esc(fmt(g.iqd))}</td><td class="num">${esc(fmt(g.frx))}</td><td class="num">${esc(fmt(g.total))}</td><td>${g.covered?esc(g.rules.map(n=>'#'+n).join(', ')):'<span class="pill NOT_FOUND">NO RULE</span>'}</td></tr>`).join('')}</tbody></table></div></details>`:'';
+    <div class="depthScroll"><table class="dmTable" style="min-width:600px"><thead><tr><th>BS mapping group</th><th>IQD</th><th>Foreign currencies</th><th>Total</th><th>Rules that read it</th></tr></thead><tbody>${gs.map(g=>`<tr class="${g.covered?'':'dmReview'}"><td><b>${esc(g.group)}</b></td><td class="num">${esc(fmt(g.iqd))}</td><td class="num">${esc(fmt(g.frx))}</td><td class="num">${esc(fmt(g.total))}</td><td>${g.off_balance?'<span class="muted">Off-balance - checked from the Outstanding Report</span>':(g.covered?esc(g.rules.map(n=>'#'+n).join(', ')):'<span class="pill NOT_FOUND">NO RULE</span>')}</td></tr>`).join('')}</tbody></table></div></details>`:'';
   $('btnDmAll').style.display=j.files&&j.files.some(f=>f.summary.rules>0)?'inline-flex':'none';
 }
 async function rerunDefault(){
   const num=(id,def)=>{const v=parseFloat($(id).value); return isNaN(v)?def:v};
   setStatus('Re-running the default mapping');
   const j=await api('/api/default/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    session_id:state.session,tolerance_abs:num('dmTolAbs',1),tolerance_pct:num('dmTolPct',0.01)/100})});
+    session_id:state.session,tolerance_abs:num('dmTolAbs',1),tolerance_pct:num('dmTolPct',0.01)/100,ob_tb:$('dmObTb').checked})});
   state.defaultRun=j; renderDefault();
   setStatus(`Default mapping: ${j.summary.REVIEW_REQUIRED} variance(s) to review`);
 }
@@ -473,7 +593,7 @@ async function runDepth(){
   const j=await api('/api/depth-search/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
     session_id:state.session,file_types:state.fileTypes,
     params:{min_value:num('depthMin',1000),min_scaled:num('depthMinScaled',100000),tol_abs:num('depthTol',1),
-            allow_scale:$('depthScale').checked,allow_sign:$('depthSign').checked,include_accounts:$('depthAccounts').checked,
+            allow_scale:$('depthScale').checked,allow_sign:$('depthSign').checked,include_accounts:$('depthAccounts').checked,include_tb_ob:$('depthTbOb').checked,
             maturity_keywords:$('depthMat').value}})});
   state.depth=j; renderDepthResults();
   $('depthMessage').innerHTML=(j.notes||[]).map(n=>`<div class="notice">${esc(n)}</div>`).join('');
@@ -1099,6 +1219,14 @@ const CLICK_ACTIONS={
   'download-translated':(el)=>guarded(el,()=>downloadFile('/api/submissions/translation-download?session_id='+encodeURIComponent(state.session)+'&kind=file&file='+encodeURIComponent(el.dataset.file),'translated.xlsx')),
   'choose-ob':()=>$('obFile').click(),
   'upload-ob':(el)=>guarded(el,uploadOutstanding),
+  'ob-build':(el)=>guarded(el,buildObPivots),
+  'ob-approve':(el)=>guarded(el,approveObPivots),
+  'ob-discard':()=>{ state.obDraft=null; renderObDraft(); },
+  'ob-auto':(el)=>guarded(el,useAutoObPivots),
+  'ob-save':(el)=>guarded(el,saveObDefinition),
+  'ob-delete-def':(el)=>guarded(el,deleteObDefinition),
+  'ob-def-download':(el)=>guarded(el,()=>downloadFile('/api/outstanding/definition?session_id='+encodeURIComponent(state.session),'pivot_definition.json')),
+  'ob-choose-def':()=>$('obbDefFile').click(),
   'download-outstanding':(el)=>guarded(el,()=>downloadFile('/api/outstanding/download?session_id='+encodeURIComponent(state.session),'Outstanding_Report_IRAQ_Pivot_Output.xlsx')),
   'download-depth':(el)=>guarded(el,()=>downloadFile('/api/depth-search/download?session_id='+encodeURIComponent(state.session)+'&file='+encodeURIComponent(el.dataset.file),'DepthSearch.xlsx')),
   'download-depth-all':(el)=>guarded(el,()=>downloadFile('/api/depth-search/download-all?session_id='+encodeURIComponent(state.session),'Depth_Search_Outputs.zip')),
@@ -1160,6 +1288,8 @@ document.addEventListener('click',e=>{
 document.addEventListener('change',e=>{
   const el=e.target;
   if(el.id==='dmStatus'){ renderDefault(); return; }
+  if(el.dataset.action==='obb-sheet'){ obbFill(null); return; }
+  if(el.id==='obbDefFile'){ if(el.files[0]) loadObDefinition(el.files[0]); el.value=''; return; }
   if(el.dataset.action==='toggle-sheet'){
     state.selection[el.dataset.file][el.dataset.sheet].checked=el.checked; return;
   }
@@ -1197,6 +1327,7 @@ document.addEventListener('input',e=>{
   if(e.target.id==='coverageSearch') renderCoverageTable();
   if(e.target.id==='depthFilter') renderDepthResults();
   if(e.target.id==='dmFilter') renderDefault();
+  if(e.target.id==='obbExcel') obCompareExcel();
 });
 
 /* ---------------- Interface language: English <-> Arabic ----------------
@@ -1628,7 +1759,55 @@ const AR_DICT={
 "Rows that look like a total line typed under the data (counted)": "صفوف تبدو كسطر إجمالي مكتوب تحت البيانات (محتسبة)",
 "Equ-IQD cells ignored because they hold text": "خلايا Equ-IQD المتجاهلة لأنها تحتوي نصًا",
 "of which read as numbers (not counted)": "منها ما يُقرأ كأرقام (غير محتسب)",
-"Amount those would add if they were counted": "المبلغ الذي ستضيفه لو احتُسبت"
+"Amount those would add if they were counted": "المبلغ الذي ستضيفه لو احتُسبت",
+"Automatic pivots": "جداول محورية تلقائية",
+"Saved pivot definition (from the library)": "تعريف جدول محوري محفوظ (من المكتبة)",
+"Approved custom pivots": "جداول محورية مخصصة معتمدة",
+"Use the automatic pivots": "استخدام الجداول المحورية التلقائية",
+"Save these pivots as my default (library)": "حفظ هذه الجداول كافتراضي (في المكتبة)",
+"Delete the saved definition": "حذف التعريف المحفوظ",
+"Download the definition": "تنزيل التعريف",
+"A saved pivot definition exists in the library; it runs automatically on every new Outstanding Report.": "يوجد تعريف جدول محوري محفوظ في المكتبة؛ يعمل تلقائيًا على كل تقرير أرصدة قائمة جديد.",
+"Pivot builder - build the pivots yourself": "منشئ الجداول المحورية - ابنِ الجداول بنفسك",
+"The pivots above are created automatically and are used as they are. If a total or a value does not look right, choose the sheet, the header row and the columns here, build the pivots, check the totals against Excel, and approve them. Only approved pivots replace the automatic ones. The Trial Balance is never mixed into these pivots.": "الجداول المحورية أعلاه تُنشأ تلقائيًا وتُستخدم كما هي. إذا بدا إجمالي أو قيمة غير صحيحة، اختر الورقة وصف العناوين والأعمدة هنا، وابنِ الجداول، وقارن الإجماليات مع Excel، ثم اعتمدها. لا تحل محل الجداول التلقائية إلا الجداول المعتمدة. لا يُخلط ميزان المراجعة أبدًا في هذه الجداول.",
+"Pivot 1 · by currency": "الجدول المحوري 1 · حسب العملة",
+"Pivot 2 · by bucket": "الجدول المحوري 2 · حسب الفترة",
+"Rows: item (LC/GTEE DESC)": "الصفوف: البند (LC/GTEE DESC)",
+"Columns: currency (BILL_CCY)": "الأعمدة: العملة (BILL_CCY)",
+"Values: sum of": "القيم: مجموع",
+"Rows: category (optional)": "الصفوف: الفئة (اختياري)",
+"Rows: currency (BILL_CCY)": "الصفوف: العملة (BILL_CCY)",
+"Columns: bucket": "الأعمدة: الفترة",
+"Load a saved definition file": "تحميل ملف تعريف محفوظ",
+"Draft pivots - not used anywhere until you approve them": "جداول مسودة - لا تُستخدم في أي مكان حتى تعتمدها",
+"Your own Excel total of the amount column (optional)": "مجموع عمود المبلغ في Excel لديك (اختياري)",
+"Draft Pivot 1": "مسودة الجدول المحوري 1",
+"Draft Pivot 2": "مسودة الجدول المحوري 2",
+"Approve and use these pivots": "اعتماد هذه الجداول واستخدامها",
+"Discard the draft": "تجاهل المسودة",
+"Amount column": "عمود المبلغ",
+"Rows summed": "الصفوف المجموعة",
+"Rows ignored: empty amount / text": "الصفوف المتجاهلة: مبلغ فارغ / نص",
+"Blank labels (shown as (blank))": "التسميات الفارغة (تظهر كـ (blank))",
+"Excel SUM of the raw amount column": "مجموع Excel لعمود المبلغ الخام",
+"Pivot grand total": "الإجمالي العام للجدول المحوري",
+"Sheet row": "صف الورقة",
+"What happens": "ما الذي يحدث",
+"Pivot 1 - LC/GTEE by currency": "الجدول المحوري 1 - LC/GTEE حسب العملة",
+"Pivot 2 - category, LC/GTEE and currency by bucket": "الجدول المحوري 2 - الفئة وLC/GTEE والعملة حسب الفترة",
+"Off-balance pivots in use:": "الجداول المحورية لخارج الميزانية المستخدمة:",
+"Off-balance - checked from the Outstanding Report": "خارج الميزانية - يُفحص من تقرير الأرصدة القائمة",
+"Also search the Trial Balance's OB- groups in the Off-balance file (only if in doubt - they are not mixed with the Outstanding Report numbers by default)": "ابحث أيضًا عن مجموعات OB- في ميزان المراجعة داخل ملف خارج الميزانية (فقط عند الشك - لا تُخلط مع أرقام تقرير الأرصدة القائمة افتراضيًا)",
+"Also compare the Trial Balance's OB- groups with the off-balance total (only if in doubt - the off-balance checks otherwise use the Outstanding Report only)": "قارن أيضًا مجموعات OB- في ميزان المراجعة مع إجمالي خارج الميزانية (فقط عند الشك - فحوصات خارج الميزانية تستخدم تقرير الأرصدة القائمة فقط)",
+"Build the pivots first, check the totals, then approve.": "ابنِ الجداول أولًا، وراجع الإجماليات، ثم اعتمدها.",
+"Pivots approved - the off-balance checks and the depth search use them now": "تم اعتماد الجداول - تستخدمها فحوصات خارج الميزانية والبحث المتعمق الآن",
+"Back to the automatic pivots": "العودة إلى الجداول المحورية التلقائية",
+"Saved definition deleted": "تم حذف التعريف المحفوظ",
+"That file is not a pivot definition": "هذا الملف ليس تعريف جدول محوري",
+"Definition loaded - press Build pivots": "تم تحميل التعريف - اضغط بناء الجداول المحورية",
+"Draft pivots built - check the totals, then approve": "تم بناء الجداول المسودة - راجع الإجماليات ثم اعتمد",
+"Not a number": "ليس رقمًا",
+"(none)": "(بلا)"
 };
 const AR_RULES=[
 [
@@ -1962,6 +2141,22 @@ const AR_RULES=[
 [
 "^The sheet '(.+)' was not extracted, so the checks that read it were skipped\\.$",
 "لم تُستخرج الورقة '{1}'، لذلك تم تخطي الفحوصات التي تقرأها."
+],
+[
+"^(\\d+) formula cell\\(s\\) in the amount column have no saved value, so they read as empty - open and save the file in Excel once, then upload it again\\.$",
+"{1} خلية معادلة في عمود المبلغ بلا قيمة محفوظة لذلك تُقرأ كفارغة - افتح الملف في Excel واحفظه مرة واحدة ثم ارفعه مجددًا."
+],
+[
+"^(\\d+) row\\(s\\) are not summed normally$",
+"{1} صف (صفوف) لا تُجمع بشكل عادي"
+],
+[
+"^Pivot (\\d) - your total: (.+)$",
+"الجدول المحوري {1} - مجموعك: {2}"
+],
+[
+"^Saved in the library: (.+) - it runs automatically on the next Outstanding Report$",
+"تم الحفظ في المكتبة: {1} - يعمل تلقائيًا على تقرير الأرصدة القائمة التالي"
 ]
 ].map(([src,tpl])=>[new RegExp(src),tpl]);
 const I18N_ATTRS=['placeholder','title','aria-label'];

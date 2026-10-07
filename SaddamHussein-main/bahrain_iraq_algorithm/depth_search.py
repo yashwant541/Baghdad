@@ -37,6 +37,8 @@ FOREIGN_PAT_AR = re.compile(r"عملات?\s+(?:ال)?اجنبيه|(?:ال)?عم�
 DEFAULT_PARAMS = {"min_value": 1000.0, "min_scaled": 100000.0, "tol_abs": 1.0,
                   "allow_scale": True, "allow_sign": True, "include_accounts": False,
                   "max_hits": 25,
+                  # the Trial Balance's OB- groups are NOT mixed with the Outstanding Report numbers unless this is switched on
+                  "include_tb_ob": False,
                   # Off-balance: the bucket (tenure) pivot is only searched on sheets whose name says maturity
                   "maturity_keywords": "maturity, tenor, tenure, استحقاق, آجال, أجل"}
 SCALES_ALT = (1000.0, 1000000.0, 0.001, 0.000001)
@@ -421,6 +423,10 @@ def run_depth_search(tb, files, file_types, params=None, externals=None):
     p.update({k: v for k, v in (params or {}).items() if v is not None})
     layout = build_layout(tb, include_accounts=bool(p["include_accounts"]), min_value=float(p["min_value"]))
     targets = layout["targets"]
+    if not p.get("include_tb_ob"):
+        targets = [t for t in targets if t.get("family") != "offbalance"]
+        for i, t in enumerate(targets):
+            t["id"] = i
     # Outstanding Report pivots (Off-balance): header row 1, data from row 2, one target per number
     for spec in externals or []:
         for et in spec["targets"]:

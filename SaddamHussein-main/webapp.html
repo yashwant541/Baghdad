@@ -94,12 +94,41 @@
   <button type="button" class="secondary" id="btnOutstandingDl" data-action="download-outstanding" style="display:none">Download pivot workbook</button></div>
 <div id="obMessage"></div><div id="obKpis" class="kpis"></div>
 <div id="obBody" style="display:none">
+  <div id="obStatus"></div>
+  <div id="obChecks"></div>
   <h3 class="subhead">Pivot 1 · LC/GTEE by Currency</h3>
   <p class="muted">Rows: LC/GTEE DESC · Columns: BILL_CCY · Values: Sum of Equ-IQD</p>
   <div class="tableWrap"><table id="obPivot1"></table></div>
   <h3 class="subhead">Pivot 2 · Category, LC/GTEE and Currency by Bucket</h3>
   <p class="muted">Rows: CATEGORY, LC/GTEE DESC, BILL_CCY · Columns: Bucket · Values: Sum of Equ-IQD</p>
   <div class="tableWrap"><table id="obPivot2"></table></div>
+  <details class="obValidation" id="obBuilderBox"><summary>Pivot builder - build the pivots yourself</summary>
+    <div class="obBuilder">
+      <p class="muted">The pivots above are created automatically and are used as they are. If a total or a value does not look right, choose the sheet, the header row and the columns here, build the pivots, check the totals against Excel, and approve them. Only approved pivots replace the automatic ones. The Trial Balance is never mixed into these pivots.</p>
+      <div class="depthSettings">
+        <label>Sheet<select id="obbSheet" data-action="obb-sheet"></select></label>
+        <label>Header row<input id="obbHeader" type="number" min="1" step="1"></label>
+      </div>
+      <h4>Pivot 1 · by currency</h4>
+      <div class="depthSettings">
+        <label>Rows: item (LC/GTEE DESC)<select id="obbP1Item"></select></label>
+        <label>Columns: currency (BILL_CCY)<select id="obbP1Ccy"></select></label>
+        <label>Values: sum of<select id="obbP1Amt"></select></label>
+      </div>
+      <h4>Pivot 2 · by bucket</h4>
+      <div class="depthSettings">
+        <label>Rows: category (optional)<select id="obbP2Cat"></select></label>
+        <label>Rows: item (LC/GTEE DESC)<select id="obbP2Item"></select></label>
+        <label>Rows: currency (BILL_CCY)<select id="obbP2Ccy"></select></label>
+        <label>Columns: bucket<select id="obbP2Bucket"></select></label>
+        <label>Values: sum of<select id="obbP2Amt"></select></label>
+      </div>
+      <div class="actions"><button type="button" class="primary" data-action="ob-build">Build pivots</button>
+        <button type="button" class="secondary" data-action="ob-choose-def">Load a saved definition file</button>
+        <input id="obbDefFile" type="file" accept=".json" style="display:none"></div>
+      <div id="obDraft"></div>
+    </div>
+  </details>
   <details class="obValidation"><summary>Validation details</summary><div class="tableWrap"><table id="obValidation"></table></div></details>
 </div>
 </section>
@@ -112,6 +141,7 @@
   <label>Tolerance (absolute)<input id="dmTolAbs" type="number" value="1" min="0" step="any"></label>
   <label>Tolerance (% of the TB amount)<input id="dmTolPct" type="number" value="0.01" min="0" step="any"></label>
 </div>
+<div class="depthSettings"><label class="check"><input id="dmObTb" type="checkbox"> Also compare the Trial Balance's OB- groups with the off-balance total (only if in doubt - the off-balance checks otherwise use the Outstanding Report only)</label></div>
 <div class="actions"><button type="button" class="secondary" data-action="dm-rerun">Re-run with these tolerances</button>
   <button type="button" class="primary" data-action="dm-pdf">Download PDF (all results)</button>
   <button type="button" class="secondary" id="btnDmAll" data-action="dm-download-all">Download all workbooks (zip)</button></div>
@@ -143,6 +173,7 @@
   <label class="check"><input id="depthScale" type="checkbox" checked> Also try thousands / millions (sheets stated "in thousands")</label>
   <label class="check"><input id="depthSign" type="checkbox" checked> Accept equal-and-opposite sign</label>
   <label class="check"><input id="depthAccounts" type="checkbox"> Also search individual account values (more matches, more noise)</label>
+  <label class="check"><input id="depthTbOb" type="checkbox"> Also search the Trial Balance's OB- groups in the Off-balance file (only if in doubt - they are not mixed with the Outstanding Report numbers by default)</label>
 </div>
 <div class="actions"><button type="button" class="primary" id="btnDepthRun" data-action="run-depth">Run depth search</button>
   <button type="button" class="secondary" id="btnDepthAll" data-action="download-depth-all" style="display:none">Download all outputs (zip)</button></div>
