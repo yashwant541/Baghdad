@@ -186,6 +186,20 @@ def submissions_export():
     eng.export_submissions(d['sub_df'],path)
     return xlsx_response(path,'Submissions_Simplified.xlsx')
 
+def _call_default_run(eng,d,opts):
+    """Run the default mapping with every option the library understands. A library older than this backend (default_report.py
+    not updated) still works: the options it does not know are dropped and the page says which file to update."""
+    import inspect
+    want={'outstanding':(d.get('outstanding') or {}).get('result'),'ob_tb':bool(opts.get('ob_tb')),'col_search':opts.get('col_search',True),
+          'sources':_sources(d),'ob_depth':opts.get('ob_depth',True)}
+    have=set(inspect.signature(DR.run_default_mapping).parameters)
+    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],**dict((k,v) for k,v in want.items() if k in have))
+    missing=[k for k in want if k not in have]
+    if missing:
+        run['notes']=list(run.get('notes') or [])+['The bahrain_iraq_algorithm library is older than backend.py: copy the latest default_report.py (and engine.py, '
+                                                  'depth_search.py, outstanding_report.py) into it and restart the backend. These options were ignored for now: %s.'%', '.join(missing)]
+    return run
+
 def _sources(d):
     return dict((e['label'],e['path']) for e in d.get('sub_files',[]))
 
@@ -214,9 +228,7 @@ def _run_default(d,eng):
             coverage.append(e)
         return matches,coverage,{'ok':False,'error':'The default-mapping report needs the latest bahrain_iraq_algorithm library '
                                  '(copy default_report.py, pdf_simple.py and engine.py into it, then restart the backend). Detail: %s'%DR_ERROR}
-    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'),
-                               ob_tb=bool((d.get('default_opts') or {}).get('ob_tb')),col_search=(d.get('default_opts') or {}).get('col_search',True),sources=_sources(d),
-                               ob_depth=(d.get('default_opts') or {}).get('ob_depth',True))
+    run=_call_default_run(eng,d,d.get('default_opts') or {})
     d['default_run']=run
     for r in run['results']:
         if r.get('ob'): continue                 # off-balance checks live on the Default Mapping page, not in Mapping Studio
@@ -265,9 +277,7 @@ def default_run():
     if 'col_search' in body: opts['col_search']=bool(body.get('col_search'))
     if 'ob_depth' in body: opts['ob_depth']=bool(body.get('ob_depth'))
     d['default_opts']=opts
-    run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'),
-                               ob_tb=bool(opts.get('ob_tb')),col_search=opts.get('col_search',True),sources=_sources(d),
-                               ob_depth=opts.get('ob_depth',True))
+    run=_call_default_run(eng,d,opts)
     d['default_run']=run
     return jsonify(_default_payload(d,run))
 
