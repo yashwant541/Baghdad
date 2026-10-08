@@ -705,6 +705,80 @@ def column_value_search(sub, side, tb_amt, tol, sources=None):
     return {"kind": "hint", "comp": _cell_comp(near, sg), "diff": tb_amt - v, "fallback": fallback, "where": where, "n_cells": len(rows)}
 
 
+def _group_values(res, groups):
+    """The amounts of the configured row groups ('For Other Purposes' ...) - they are legitimate numbers on the sheet."""
+    vals = []
+    frames = [f for f in (res.get("data1"), res.get("data2")) if f is not None]
+    for g in groups:
+        keys = set(_norm_item(i) for i in g["items"])
+        for f in frames:
+            rows = f[f["LC_GTEE_DESC"].fillna("").map(_norm_item).isin(keys)]
+            if not len(rows):
+                continue
+            rows = rows.assign(BILL_CCY=rows["BILL_CCY"].fillna("(blank)"), BUCKET=rows["BUCKET"].fillna("(blank)"))
+            vals += [float(rows["EQUI_IQD"].sum()), float(rows[rows["BILL_CCY"] == LOCAL_CCY]["EQUI_IQD"].sum()),
+                     float(rows[rows["BILL_CCY"] != LOCAL_CCY]["EQUI_IQD"].sum())]
+            vals += [float(v) for v in rows.groupby("BILL_CCY")["EQUI_IQD"].sum()]
+            vals += [float(v) for v in rows.groupby("BUCKET")["EQUI_IQD"].sum()]
+    return vals
+
+
+def _ob_number_check(sub, sheets, candidates, tol, cap=800):
+    """The REVERSE direction of the depth search: every non-zero number on the off-balance sheets is looked up among the pivot
+    values (x1, x1,000, x1,000,000, either sign, thousands rounding allowed). Numbers that no pivot value explains are listed."""
+    import bisect
+    cells = sub[sub.sheet.isin(sheets)] if (sub is not None and len(sub)) else None
+    cand = sorted(set(round(abs(float(c)), 4) for c in candidates if c is not None and abs(float(c)) > 1e-9))
+    if cells is None or not len(cells) or not cand:
+        return None
+    explained, unexplained = 0, []
+    total = 0
+    for r in cells.itertuples(index=False):
+        v = abs(float(r.normalized_amount))
+        if v < 1e-9:
+            continue
+        total += 1
+        sc = float(getattr(r, "scale", 1.0) or 1.0)
+        try:
+            from .depth_search import _decimals
+            dec = _decimals(float(getattr(r, "raw_amount", v)))               # a figure shown with n decimals is rounded to that precision
+        except Exception:
+            dec = 0
+        ok = False
+        for variant in (1.0, 1000.0, 1000000.0):
+            w = v * variant
+            eff = (sc if sc > 1 else 1.0) * variant
+            t = max(tol, 0.5 * eff * (10.0 ** (-dec))) if eff > 1 else tol
+            t = max(t, tol)
+            i = bisect.bisect_left(cand, w - t)
+            if i < len(cand) and cand[i] <= w + t:
+                ok = True
+                break
+        if ok:
+            explained += 1
+        else:
+            unexplained.append({"file": r.submission_file, "sheet": r.sheet, "cell": r.source_cell, "row_label": r.line_description,
+                                "column_header": str(getattr(r, "column_context", "") or "").split(" | ")[0], "currency": r.currency,
+                                "value": float(r.normalized_amount)})
+    return {"cells": total, "explained": explained, "unexplained_total": len(unexplained), "unexplained": unexplained[:cap],
+            "pivot_values": len(cand)}
+
+
+def _closest_hint(cells, amount):
+    """For a value nothing equals: the closest number on the sheets at x1 / x1,000 / x1,000,000 (within 25 %)."""
+    best = None
+    for sheet, cell, rown, label, val in cells:
+        for s in (1.0, 1000.0, 1000000.0):
+            w = abs(val) * s
+            if w <= 0:
+                continue
+            d = abs(w - abs(amount))
+            rel = d / abs(amount)
+            if rel <= 0.25 and (best is None or rel < best[0]):
+                best = (rel, sheet, cell, label, val, s, w, d)
+    return best
+
+
 def ob_depth_results(res, sub, sources, eng, ob_names, notes, start_n):
     """DEPTH SEARCH of the off-balance pivots: EVERY value of Pivot 1 and of Pivot 2 is searched in every non-zero cell of the
     off-balance workbook (the bucket pivot on the maturity sheet), with the same engine as the Depth Search page (thousands /
@@ -716,12 +790,20 @@ def ob_depth_results(res, sub, sources, eng, ob_names, notes, start_n):
     labels = [x for x in labels if (sources or {}).get(x)]
     if not labels:
         notes.append("The off-balance depth search needs the original workbook of the off-balance file; it was skipped.")
-        return []
+        return [], None
     import pandas as pd
     empty_tb = pd.DataFrame({"bs_mapping": [], "account": [], "account_desc": [], "tran_ccy": [], "adjusted_balance": []})
     kws = ", ".join(["maturity, tenor, tenure"] + [x.lower() for x in (ob_names.get("maturity"),) if x])
+    # COMPLETE search: nothing is skipped for being small (min_value 1, scaled matches from 1,000), the bucket pivot is searched on
+    # every off-balance sheet too, and up to 200 hits per value are kept (the three sheets are picked out afterwards)
     ds = run_depth_search(empty_tb, [{"label": x, "path": sources[x]} for x in labels], dict((x, "offbalance") for x in labels),
-                          {"tol_abs": eng.tolerance_abs, "maturity_keywords": kws}, externals=depth_specs(res))
+                          {"tol_abs": eng.tolerance_abs, "min_value": 1.0, "min_scaled": 1000.0, "max_hits": 200, "maturity_keywords": kws},
+                          externals=depth_specs(res, maturity_sheet_scope="all"))
+    raw_cells = []
+    for lab in labels:
+        for sh in sorted(sheets):
+            raw_cells += [(sh, c, rn, lb, v) for c, rn, lb, v in _raw_sheet_cells(sources[lab], sh)]
+    n_cells_searched = sum((e.get("stats") or {}).get("numeric_cells", 0) for e in ds["files"])
     T = dict((t["id"], t) for t in ds["targets"])
     members = defaultdict(list)
     for t in ds["targets"]:
@@ -739,7 +821,7 @@ def ob_depth_results(res, sub, sources, eng, ob_names, notes, start_n):
             continue
         hits = []
         for entry in ds["files"]:
-            hits += [h for h in entry["hits"] if h["target_id"] == t["id"]]
+            hits += [h for h in entry["hits"] if h["target_id"] == t["id"] and h["sheet"] in sheets]     # only the off-balance sheets
         hits.sort(key=lambda h: (h["currency_check"] == "CONFLICT", -float(h.get("name_similarity") or 0), abs(float(h["diff"]))))
         same = [m["label"] for m in members[t["group"]] if m["id"] != t["id"]]
         pivot_n = int(str(t["sheet"]).split()[-1])
@@ -760,7 +842,7 @@ def ob_depth_results(res, sub, sources, eng, ob_names, notes, start_n):
             where = "%s!%s" % (h["sheet"], h["cell"])
             how = []
             if float(h["scale"]) != 1.0:
-                how.append("the sheet is in x%s" % format(h["scale"], "g"))
+                how.append("the sheet is in x%s" % (format(h["scale"], ",.0f") if h["scale"] >= 1 else format(h["scale"], "g")))
             if h["opposite_sign"]:
                 how.append("opposite sign")
             warn.insert(0, "Found in row '%s', column '%s'%s." % (h["row_label"], h["column_header"], (" (" + ", ".join(how) + ")") if how else ""))
@@ -768,6 +850,14 @@ def ob_depth_results(res, sub, sources, eng, ob_names, notes, start_n):
                 warn.insert(0, "The value is only found in a column of a different currency (%s), so it is not accepted as a match." % h.get("column_currency"))
             if len(hits) > 1:
                 warn.append("%d other cell(s) hold the same value: %s." % (len(hits) - 1, ", ".join("%s!%s" % (x["sheet"], x["cell"]) for x in hits[1:4])))
+        if not hits:
+            warn.append("Searched every non-zero number of the off-balance sheets (%d cells) at x1, x1,000 and x1,000,000 (and the reverse), "
+                        "with either sign: no cell equals this value." % n_cells_searched)
+            near = _closest_hint(raw_cells, float(t["amount"]))
+            if near:
+                warn.append("Closest number: %s in %s!%s (row '%s') - x%s = %s, %s away (%s%%)." % (
+                    format(near[4], ",.3f"), near[1], near[2], near[3], format(near[5], ",.0f"), format(near[6], ",.0f"), format(near[7], ",.0f"),
+                    format(near[0] * 100, ".2f")))
         sub_amt = float(sum(c["amount"] * c["sign"] for c in comps))
         var = float(t["amount"]) - sub_amt
         tbc = [{"account": t["label"], "account_desc": t["label"], "bs_mapping": OB_SOURCE, "currency": t["currency"], "amount": float(t["amount"]),
@@ -782,7 +872,10 @@ def ob_depth_results(res, sub, sources, eng, ob_names, notes, start_n):
             "tb_components": tbc, "components": comps, "warnings": warn, "tb_marks": [mark], "expanded": True, "derived": True, "ob": True,
             "by_value": False, "depth": True, "resolved": {"tb_components": tbc, "components": comps}, "wildcard": False,
             "n_tb": 1, "n_sub": len(comps), "color": ""})
-    return out
+    # the other direction: which numbers on the sheets does no pivot value explain?
+    cand = [t["amount"] for t in ds["targets"] if t.get("external")] + _group_values(res, load_ob_row_groups())
+    check = _ob_number_check(sub, sheets, cand, eng.tolerance_abs)
+    return out, check
 
 
 def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=False, col_search=True, sources=None, ob_depth=True):
@@ -876,15 +969,17 @@ def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=Fa
             "wildcard": any(str(x.get("bs_mapping") or "").endswith("*") for x in (t.get("tb_side") or []) if x.get("level") == "group"),
             "n_tb": sum(1 for c in tbc if not c.get("placeholder")), "n_sub": sum(1 for c in sbc if not c.get("placeholder")),
             "color": ""})
+    ob_check = None
     if ob_depth and outstanding is not None and ob_pivots:
-        results += ob_depth_results(outstanding, sub, sources, eng, _ob_sheet_names(sub), ob_notes, len(results) + 1)
+        dres, ob_check = ob_depth_results(outstanding, sub, sources, eng, _ob_sheet_names(sub), ob_notes, len(results) + 1)
+        results += dres
     palette_i = 0
     for r in results:
         if r["n_sub"]:
             r["color"] = PALETTE[palette_i % len(PALETTE)]
             palette_i += 1
     notes = ["The sheet '%s' was not extracted, so the checks that read it were skipped." % x[1] for x in skipped] + ob_notes
-    return {"results": results, "summary": summarise(results), "groups": group_coverage(tb, results), "notes": notes, "ob_pivots": ob_pivots,
+    return {"results": results, "summary": summarise(results), "groups": group_coverage(tb, results), "notes": notes, "ob_pivots": ob_pivots, "ob_check": ob_check,
             "params": {"tol_abs": eng.tolerance_abs, "tol_pct": eng.tolerance_pct}}
 
 
@@ -1046,6 +1141,28 @@ def write_default_workbook(path_in, path_out, label, tb, run):
     wr.freeze_panes = "D5"
     wr.auto_filter.ref = "A4:M%d" % max(wr.max_row, 5)
 
+    # -- off-balance: numbers on the sheets that no pivot value explains
+    chk = run.get("ob_check")
+    mine_cells = [c for c in (chk or {}).get("unexplained", []) if c["file"] == label]
+    if chk and any("off" in str(n).lower() and "balance" in str(n).lower() for n in names):
+        wn = wb.create_sheet(_unique_name(wb, "Off-balance Number Check"))
+        wn["A1"] = "Off-balance number check - every non-zero number of the off-balance sheets against the pivot values"
+        wn["A1"].font = Font(bold=True, size=13)
+        wn["A2"] = ("%d numbers on the sheets, %d explained by a pivot value (x1, x1,000, x1,000,000, either sign) or by a configured row group, "
+                    "%d not explained. %d pivot values were used." % (chk["cells"], chk["explained"], chk["unexplained_total"], chk["pivot_values"]))
+        wn.append([])
+        wn.append(["Sheet", "Cell", "Row label", "Column", "Currency", "Value as extracted"])
+        for c in wn[4]:
+            c.font, c.fill = bold, grey
+        for c in mine_cells:
+            wn.append([c["sheet"], c["cell"], c["row_label"], c["column_header"], c["currency"], c["value"]])
+            wn.cell(row=wn.max_row, column=6).number_format = "#,##0.00;[Red]-#,##0.00"
+            if c["sheet"] in names and wb[c["sheet"]][c["cell"]].fill.fill_type is None:
+                wb[c["sheet"]][c["cell"]].fill = _fill("F4B6B6")             # not explained by any pivot value
+        for letter, w in zip("ABCDEF", [34, 8, 44, 40, 10, 20]):
+            wn.column_dimensions[letter].width = w
+        wn.freeze_panes = "A5"
+
     # -- every Trial Balance account behind every rule
     wd = wb.create_sheet(_unique_name(wb, "Default Mapping TB Detail"))
     wd.append(["Rule #", "Rule", "BS mapping", "Account", "Account description", "Currency", "Amount", "Currencies behind it"])
@@ -1196,6 +1313,16 @@ def build_pdf(run, files=None, tb_name="", suggestions=None, approved=None, manu
               rows, [0.5, 3.4, 4.6, 0.8, 1.6, 1.6, 1.5, 1.0, 1.5, 2.6], size=6.2,
               aligns=["l", "l", "l", "l", "r", "r", "r", "r", "l", "l"], fills=fills)
 
+    chk = run.get("ob_check")
+    if chk:
+        pdf.heading("2b. Off-balance number check", 12)
+        pdf.paragraph("Every pivot value was searched in every non-zero cell of the three off-balance sheets (x1, x1,000, x1,000,000, either sign - the depth-search "
+                      "lines in section 2). In the other direction, %d numbers on the sheets were looked up among the %d pivot values: %d explained, %d not."
+                      % (chk["cells"], chk["pivot_values"], chk["explained"], chk["unexplained_total"]), 8.5)
+        if chk["unexplained"]:
+            pdf.table(["Sheet", "Cell", "Row", "Column", "Value"],
+                      [[c["sheet"], c["cell"], c["row_label"], c["column_header"], _money(c["value"])] for c in chk["unexplained"][:150]],
+                      [3, 0.8, 4, 3.5, 1.6], size=6.4, aligns=["l", "l", "l", "l", "r"])
     groups = run.get("groups") or []
     if groups:
         pdf.heading("3. Trial Balance groups and the rules that read them", 12)

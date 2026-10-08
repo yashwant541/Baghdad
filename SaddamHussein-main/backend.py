@@ -30,6 +30,12 @@ try:
 except Exception as _e:
     DR=None; DR_ERROR=str(_e)
 
+try:
+    from bahrain_iraq_algorithm import depth_engine as DE
+    DE_ERROR=None
+except Exception as _e:
+    DE=None; DE_ERROR=str(_e)
+
 SESSIONS={}
 
 def get_session(sid=None):
@@ -251,7 +257,7 @@ def _default_payload(d,run):
         sub=d.get('sub_df')
         read=sorted(set(sub[sub.submission_file==entry['label']].sheet)) if (sub is not None and len(sub)) else []
         files.append({'file':entry['label'],'summary':DR.summarise(mine),'rules':[r['n'] for r in mine],'sheets_read':read})
-    return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files,'groups':run.get('groups',[]),'notes':run.get('notes',[]),
+    return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files,'groups':run.get('groups',[]),'notes':run.get('notes',[]),'ob_check':run.get('ob_check'),
             'options':{'ob_tb':bool((d.get('default_opts') or {}).get('ob_tb')),'col_search':(d.get('default_opts') or {}).get('col_search',True),'ob_depth':(d.get('default_opts') or {}).get('ob_depth',True)},
             'ob_status':((d.get('outstanding') or {}).get('status'))}
 
@@ -472,6 +478,167 @@ def depth_download_all():
         entries.append((name,out))
     if not entries:return jsonify({'ok':False,'error':'No searched files to download.'}),400
     return bytes_response(DS.build_zip(entries),'Depth_Search_Outputs.zip','application/zip')
+
+
+# ---------------- Depth engine: numbers of ANY file searched in other files (direct + bucket/knapsack), annotated output, mapping ----------------
+
+def _de_unavailable():
+    return jsonify({'ok':False,'error':'The depth engine needs the latest bahrain_iraq_algorithm library in your project (copy depth_engine.py, '
+                    'depth_search.py and engine.py into it, then restart the backend). Detail: %s'%DE_ERROR}),400
+
+def _de_store(f,d,prefix):
+    name=Path(f.filename or prefix+'.xlsx').name
+    if Path(name).suffix.lower() not in ('.xlsx','.xlsm','.xls','.xlsb'):
+        raise ValueError('%s is not an Excel workbook (.xlsx, .xlsm, .xls or .xlsb).'%name)
+    path=save_upload(f,d,prefix)
+    if Path(name).suffix.lower() in ('.xls','.xlsb'):
+        if TR is None: raise ValueError('Reading .xls/.xlsb needs the latest bahrain_iraq_algorithm library. Detail: %s'%TR_ERROR)
+        path=TR.to_xlsx(path,d['dir'])
+    idx=DE.WorkbookIndex(path,name)
+    return {'label':name,'path':path,'idx':idx,'sheets':DE.sheet_summaries(idx),'warnings':idx.warnings}
+
+def _de_info(x):
+    return {'file':x['label'],'sheets':x['sheets'],'warnings':x['warnings']}
+
+@app.route('/api/engine/source',methods=['POST','OPTIONS'])
+def engine_source():
+    if DE is None: return _de_unavailable()
+    sid,d=get_session(request.form.get('session_id')); f=request.files.get('file')
+    if not f: return jsonify({'ok':False,'error':'Upload the source workbook.'}),400
+    eng=d.setdefault('engine',{})
+    try: eng['source']=_de_store(f,d,'engsrc')
+    except ValueError as exc: return jsonify({'ok':False,'error':str(exc)}),400
+    eng['result']=None; eng['mapping']=None
+    return jsonify(dict(_de_info(eng['source']),ok=True))
+
+@app.route('/api/engine/targets',methods=['POST','OPTIONS'])
+def engine_targets():
+    if DE is None: return _de_unavailable()
+    sid,d=get_session(request.form.get('session_id')); fs=request.files.getlist('files')
+    if not fs: return jsonify({'ok':False,'error':'Upload at least one target workbook.'}),400
+    eng=d.setdefault('engine',{}); eng['targets']=[]
+    for i,f in enumerate(fs[:8],1):
+        try: eng['targets'].append(_de_store(f,d,'engtg%d'%i))
+        except ValueError as exc: return jsonify({'ok':False,'error':str(exc)}),400
+    eng['result']=None; eng['mapping']=None
+    return jsonify({'ok':True,'files':[_de_info(x) for x in eng['targets']]})
+
+def _de_params(ps):
+    out={}
+    for k,default in (('tol_abs',1.0),('min_value',1.0),('bucket_cells',28),('bucket_max_k',8),('time_limit',90.0)):
+        try: out[k]=type(default)(ps.get(k,default))
+        except (TypeError,ValueError): out[k]=default
+    out['allow_scale']=bool(ps.get('allow_scale',True)); out['allow_sign']=bool(ps.get('allow_sign',True)); out['bucket']=bool(ps.get('bucket',True))
+    out['bucket_scope']=ps.get('bucket_scope') if ps.get('bucket_scope') in ('both','column','row') else 'both'
+    out['bucket_mode']=ps.get('bucket_mode') if ps.get('bucket_mode') in ('both','run','subset') else 'both'
+    try: out['max_chance']=min(5.0,max(0.001,float(ps.get('max_chance',0.2))))
+    except (TypeError,ValueError): out['max_chance']=0.2
+    out['source_scale']=ps.get('source_scale') if str(ps.get('source_scale','auto')) in ('auto','1','1000','1000000') else 'auto'
+    return out
+
+@app.route('/api/engine/run',methods=['POST','OPTIONS'])
+def engine_run():
+    if DE is None: return _de_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id')); eng=d.get('engine') or {}
+    if not eng.get('source'): return jsonify({'ok':False,'error':'Upload the source workbook first.'}),400
+    if not eng.get('targets'): return jsonify({'ok':False,'error':'Upload the target workbooks first.'}),400
+    sheets=body.get('source_sheets') or []
+    if not sheets: return jsonify({'ok':False,'error':'Mark at least one source sheet.'}),400
+    tsel=body.get('target_sheets') or {}
+    targets=[{'label':t['label'],'idx':t['idx'],'sheets':tsel.get(t['label']) or None} for t in eng['targets']]
+    res=DE.run_engine({'label':eng['source']['label'],'idx':eng['source']['idx'],'sheets':sheets},targets,_de_params(body.get('params') or {}))
+    eng['result']=res; eng['mapping']=None
+    return jsonify({'ok':True,'stats':res['stats'],'notes':res['notes'],'rows':DE.summary_rows(res),'targets':res['targets'],'source':res['source'],
+                    'per_file':[{'file':t['label'],'found':sum(1 for g in res['groups'].values() if any(h['file']==t['label'] and h['currency_check']!='CONFLICT' for h in g['hits']) or any(c['file']==t['label'] for c in g['combos']))} for t in eng['targets']]})
+
+def _de_out(d,prefix,label):
+    ext='.xlsm' if label.lower().endswith('.xlsm') else '.xlsx'
+    safe=''.join(ch if ch.isalnum() or ch in '-_.' else '_' for ch in Path(label).stem)
+    return os.path.join(d['dir'],prefix+safe+ext), safe+'_DepthEngine'+ext
+
+@app.route('/api/engine/download',methods=['GET'])
+def engine_download():
+    if DE is None: return _de_unavailable()
+    _,d=get_session(request.args.get('session_id')); eng=d.get('engine') or {}
+    res=eng.get('result')
+    if not res: return jsonify({'ok':False,'error':'Run the search first.'}),400
+    label=request.args.get('file','')
+    if request.args.get('kind')=='source':
+        out,name=_de_out(d,'engsrc_out_',eng['source']['label'])
+        DE.write_source_workbook(eng['source']['path'],out,eng['source']['label'],res)
+    else:
+        t=next((x for x in eng['targets'] if x['label']==label),None)
+        if not t: return jsonify({'ok':False,'error':'That file is not one of the targets.'}),400
+        out,name=_de_out(d,'engtg_out_',label)
+        DE.write_target_workbook(t['path'],out,label,res)
+    with open(out,'rb') as fh: data=fh.read()
+    return bytes_response(data,name,_depth_mime(out))
+
+@app.route('/api/engine/download-all',methods=['GET'])
+def engine_download_all():
+    if DE is None: return _de_unavailable()
+    _,d=get_session(request.args.get('session_id')); eng=d.get('engine') or {}
+    res=eng.get('result')
+    if not res: return jsonify({'ok':False,'error':'Run the search first.'}),400
+    entries=[]
+    out,name=_de_out(d,'engsrc_out_',eng['source']['label']); DE.write_source_workbook(eng['source']['path'],out,eng['source']['label'],res); entries.append(('SOURCE_'+name,out))
+    for t in eng['targets']:
+        out,name=_de_out(d,'engtg_out_',t['label']); DE.write_target_workbook(t['path'],out,t['label'],res); entries.append((name,out))
+    return bytes_response(DS.build_zip(entries) if DS else DE.build_zip(entries),'Depth_Engine_Outputs.zip','application/zip')
+
+def _current_default_templates():
+    try: return ReconEngine().load_default_mapping()
+    except Exception: return []
+
+@app.route('/api/engine/mapping',methods=['POST','OPTIONS'])
+def engine_mapping():
+    """Build the mapping from what the search found: the portable depth mapping and default-mapping rules (source rows read as BS groups)."""
+    if DE is None: return _de_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id')); eng=d.get('engine') or {}
+    res=eng.get('result')
+    if not res: return jsonify({'ok':False,'error':'Run the search first.'}),400
+    as_tb=bool(body.get('as_tb',True)); combos=bool(body.get('include_combinations',False))
+    doc=DE.build_mapping(res,as_tb=as_tb)
+    rules=DE.templates_from_mapping(doc,include_combinations=combos) if as_tb else []
+    merged,added=DE.merge_templates(_current_default_templates(),rules)
+    eng['mapping']={'doc':doc,'rules':rules,'merged':merged,'added':added}
+    return jsonify({'ok':True,'entries':len(doc['entries']),'direct':sum(1 for e in doc['entries'] if e['method']=='DIRECT'),
+                    'combinations':sum(1 for e in doc['entries'] if e['method']=='COMBINATION'),'rules':len(rules),'added':added,
+                    'preview':[r['label'] for r in rules[:25]]})
+
+@app.route('/api/engine/mapping-download',methods=['GET'])
+def engine_mapping_download():
+    if DE is None: return _de_unavailable()
+    _,d=get_session(request.args.get('session_id')); m=(d.get('engine') or {}).get('mapping')
+    if not m: return jsonify({'ok':False,'error':'Build the mapping first.'}),400
+    kind=request.args.get('kind','depth')
+    if kind=='rules': doc,name=DE.mapping_document(m['rules'],'depth engine'),'Depth_Engine_Default_Mapping_Rules.json'
+    elif kind=='merged': doc,name=DE.merged_document(m['merged'],'depth engine rules'),'default_mapping.json'
+    else: doc,name=m['doc'],'Depth_Engine_Mapping.json'
+    return bytes_response(json.dumps(doc,ensure_ascii=False,indent=1).encode('utf-8'),name,'application/json')
+
+@app.route('/api/depth-search/mapping',methods=['POST','OPTIONS'])
+def depth_mapping():
+    """Default-mapping rules from the Trial Balance depth search (every BS-mapping value found in a submission)."""
+    if DS is None or DE is None: return _de_unavailable()
+    body=request.get_json(force=True,silent=True) or {}
+    sid,d=get_session(body.get('session_id')); res=d.get('depth')
+    if not res: return jsonify({'ok':False,'error':'Run the depth search first.'}),400
+    rules=DE.templates_from_tb_depth(res)
+    merged,added=DE.merge_templates(_current_default_templates(),rules)
+    d['depth_mapping']={'rules':rules,'merged':merged,'added':added}
+    return jsonify({'ok':True,'rules':len(rules),'added':added,'preview':[r['label'] for r in rules[:25]]})
+
+@app.route('/api/depth-search/mapping-download',methods=['GET'])
+def depth_mapping_download():
+    if DE is None: return _de_unavailable()
+    _,d=get_session(request.args.get('session_id')); m=d.get('depth_mapping')
+    if not m: return jsonify({'ok':False,'error':'Build the mapping first.'}),400
+    if request.args.get('kind')=='merged': doc,name=DE.merged_document(m['merged'],'depth search rules'),'default_mapping.json'
+    else: doc,name=DE.mapping_document(m['rules'],'depth search'),'Depth_Search_Default_Mapping_Rules.json'
+    return bytes_response(json.dumps(doc,ensure_ascii=False,indent=1).encode('utf-8'),name,'application/json')
 
 
 # ---------------- Arabic submissions: translate with the user's dictionary, or keep working in Arabic ----------------

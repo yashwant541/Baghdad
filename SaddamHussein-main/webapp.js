@@ -3,7 +3,7 @@
    through addEventListener + event delegation, and every network call goes
    through api() which never lets a non-JSON / error response fail silently. */
 
-let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',fileTypes:{},depth:null,defaultRun:null,obDraft:null,workLang:null,outstanding:null,uiLang:'en',
+let state={session:null,pivot:[],pivotCols:[],tbTree:[],tbRaw:[],tbItems:[],tbSel:new Set(),acctView:'desc',localCcy:'IQD',fileTypes:{},depth:null,defaultRun:null,obDraft:null,engine:{source:null,targets:[],result:null,mapping:null},workLang:null,outstanding:null,uiLang:'en',
   tbGroupItems:[],tbSelGroups:new Set(),tbLevel:'account',
   subFilesMeta:[],selection:{},subPreview:[],subSel:new Set(),subExtra:[],
   suggestions:[],suggestionDecisions:{},manualMatches:[],results:[],lineage:[],
@@ -525,9 +525,12 @@ function renderDefault(){
   let out=state.subFilesMeta.map(f=>{
     const rs=dmRulesFor(f.file,all); if(!rs.length) return '';
     const sm=dmSummary(rs), body=rowsHtml(rs);
+    const chk=j.ob_check, mine=chk?(chk.unexplained||[]).filter(c=>c.file===f.file):[];
+    const chkHtml=(chk&&rs.some(r=>r.depth))?`<div style="margin-top:8px"><span class="chip chipClub" data-tr="1">${esc(`Number check: ${chk.explained} of ${chk.cells} sheet numbers are explained by the pivots`)}</span></div>
+      ${mine.length?`<details style="margin-top:8px"><summary>${esc(chk.unexplained_total+' number(s) on the off-balance sheets are not explained by any pivot value')}</summary><div class="depthScroll"><table class="dmTable" style="min-width:640px"><thead><tr><th>Sheet</th><th>Cell</th><th>Row</th><th>Column</th><th>Value</th></tr></thead><tbody>${mine.slice(0,400).map(c=>`<tr><td>${esc(c.sheet)}</td><td><b>${esc(c.cell)}</b></td><td>${esc(c.row_label)}</td><td>${esc(c.column_header)}</td><td class="num">${esc(fmt(c.value))}</td></tr>`).join('')}</tbody></table></div></details>`:''}`:'';
     return `<div class="depthCard"><div class="depthCardHead"><div><b>${esc(f.file)}</b> <span class="chip">${esc((DEPTH_TYPES.find(t=>t[0]===state.fileTypes[f.file])||[0,''])[1])}</span></div>
       <button type="button" class="primary" data-action="dm-download" data-file="${esc(f.file)}">Download annotated workbook</button></div>
-      <div>${dmChips(sm)}${sm.REVIEW_REQUIRED||sm.MATCH_WITHIN_TOLERANCE?`<span class="chip">${esc('Total absolute variance '+fmt(sm.abs))}</span>`:''}</div>
+      <div>${dmChips(sm)}${chkHtml}${sm.REVIEW_REQUIRED||sm.MATCH_WITHIN_TOLERANCE?`<span class="chip">${esc('Total absolute variance '+fmt(sm.abs))}</span>`:''}</div>
       <div class="muted" style="margin-top:6px"><span>${esc('Sheets read from this file:')}</span> <span data-tr="1">${esc(((j.files.find(x=>x.file===f.file)||{}).sheets_read||[]).join(' · ')||'(none)')}</span></div>
       ${sm.MATCH+sm.MATCH_WITHIN_TOLERANCE+sm.REVIEW_REQUIRED===0?`<div class="notice" style="margin:10px 0 0">${esc('No rule found a cell in this file. Check that its sheets were selected when extracting and that their row labels match the mapping.')}</div>`:''}
       ${body?`<div class="depthScroll"><table class="dmTable">${head}<tbody>${body}</tbody></table></div>`:empty}</div>`;
@@ -561,6 +564,88 @@ function downloadDefaultPdf(){
   const approved=(state.suggestions||[]).map((s,i)=>!!state.suggestionDecisions[i]);
   return downloadFile('/api/default/pdf','Default_Mapping_Results.pdf',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({session_id:state.session,manual_matches:manual,approved})});
+}
+
+/* ---------------- Search Engine: any file's numbers searched in other files (direct + bucket), outputs, mapping ---------------- */
+
+const ENG_STATUS={DIRECT:'Found',COMBINATION:'Found as a combination',POSSIBLE:'Possible combination (could be a coincidence)',NOT_FOUND:'Not found',SKIPPED:'Not searched (time limit)'};
+function engSheetBoxes(files,kind){
+  return files.map(f=>`<div class="depthCard"><div class="depthCardHead"><div><b>${esc(f.file)}</b></div></div>
+    ${(f.warnings||[]).map(w=>`<div class="notice" style="margin:6px 0">${esc(w)}</div>`).join('')}
+    <div>${f.sheets.map(s=>`<label class="check" style="display:inline-flex;margin:3px 14px 3px 0"><input type="checkbox" data-eng="${kind}" data-file="${esc(f.file)}" data-sheet="${esc(s.sheet)}" ${(kind==='tg'||s.cells>0)?'checked':''} ${s.cells===0&&kind==='src'?'disabled':''}> <span data-tr="1">${esc(s.sheet)}</span> <span class="muted">(${esc(fmt(s.cells))} numbers${s.hidden?', hidden':''})</span></label>`).join('')}</div></div>`).join('');
+}
+async function engReadSource(){
+  const f=$('engSrcFile').files[0]; if(!f){toast('Choose the source workbook first');return}
+  const fd=new FormData(); fd.append('session_id',state.session); fd.append('file',f);
+  setStatus('Reading the source workbook');
+  const j=await api('/api/engine/source',{method:'POST',body:fd});
+  state.engine.source=j; state.engine.result=null;
+  $('engSrcSheets').innerHTML='<p class="muted">Mark the sheets whose numbers should be searched for.</p>'+engSheetBoxes([j],'src');
+  renderEngResults(); setStatus('Source read');
+}
+async function engReadTargets(){
+  const fs=[...$('engTgFiles').files]; if(!fs.length){toast('Choose the target workbooks first');return}
+  const fd=new FormData(); fd.append('session_id',state.session); fs.slice(0,8).forEach(f=>fd.append('files',f));
+  setStatus('Reading the target workbooks');
+  const j=await api('/api/engine/targets',{method:'POST',body:fd});
+  state.engine.targets=j.files; state.engine.result=null;
+  $('engTargets').innerHTML=engSheetBoxes(j.files,'tg'); renderEngResults(); setStatus('Targets read');
+}
+function engChecked(kind){
+  const out={};
+  document.querySelectorAll(`input[data-eng="${kind}"]:checked`).forEach(el=>{ (out[el.dataset.file]=out[el.dataset.file]||[]).push(el.dataset.sheet); });
+  return out;
+}
+async function engRun(){
+  const src=state.engine.source; if(!src){toast('Read the source file first');return}
+  if(!(state.engine.targets||[]).length){toast('Read the target files first');return}
+  const srcSheets=(engChecked('src')[src.file]||[]); if(!srcSheets.length){toast('Mark at least one source sheet');return}
+  const tsel=engChecked('tg'), num=(id,d)=>{const v=parseFloat($(id).value); return isNaN(v)?d:v};
+  const params={tol_abs:num('engTol',1),min_value:num('engMin',1),source_scale:$('engUnit').value,allow_scale:$('engScale').checked,allow_sign:$('engSign').checked,
+    bucket:$('engBucket').checked,bucket_mode:$('engMode').value,max_chance:num('engStrict',0.2),bucket_cells:num('engCells',20),bucket_max_k:num('engK',8),bucket_scope:$('engScope').value,time_limit:num('engTime',90)};
+  $('engMessage').innerHTML=''; setStatus('Searching every source number in the target files');
+  const j=await api('/api/engine/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.session,source_sheets:srcSheets,target_sheets:tsel,params})});
+  state.engine.result=j; state.engine.mapping=null; renderEngResults();
+  setStatus(`Search done - ${j.stats.direct+j.stats.combination} of ${j.stats.distinct} distinct numbers found`);
+}
+function renderEngResults(){
+  const j=state.engine.result, k=$('engKpis'); if(!k) return;
+  $('btnEngAll').style.display=j?'inline-flex':'none'; $('engResultBox').style.display=j?'block':'none';
+  if(!j){ k.innerHTML=''; $('engFiles').innerHTML=''; $('engMessage').innerHTML=''; $('engMapMsg').innerHTML=''; $('engMapBtns').style.display='none'; return; }
+  const s=j.stats;
+  k.innerHTML=[['Source numbers',s.values],['Distinct values',s.distinct],['Found in a single cell',s.direct],['Found as a combination',s.combination],['Possible combinations',s.possible||0],['Not found',s.not_found+(s.skipped||0)]]
+    .map(([l,v])=>`<div class="kpi"><small>${esc(l)}</small><b>${esc(fmt(v))}</b></div>`).join('');
+  $('engMessage').innerHTML=(j.notes||[]).map(n=>`<div class="notice">${esc(n)}</div>`).join('')+
+    `<div class="muted" style="margin:6px 0">${esc(`${fmt(s.target_cells)} target cells searched in ${s.seconds} s`)}</div>`;
+  $('engFiles').innerHTML=`<div class="depthCard"><div class="depthCardHead"><div><b>${esc(j.source.label)}</b> <span class="chip">source</span></div>
+      <button type="button" class="secondary" data-action="eng-download" data-kind="source">Download the annotated source</button></div></div>`+
+    (j.per_file||[]).map(f=>`<div class="depthCard"><div class="depthCardHead"><div><b>${esc(f.file)}</b> <span class="chip">${esc(f.found+' source numbers found here')}</span></div>
+      <button type="button" class="primary" data-action="eng-download" data-file="${esc(f.file)}">Download annotated workbook</button></div></div>`).join('');
+  renderEngTable();
+}
+function renderEngTable(){
+  const j=state.engine.result, t=$('engTable'); if(!j||!t) return;
+  const q=($('engFilter').value||'').toLowerCase(), st=$('engStatus').value;
+  const rows=j.rows.filter(r=>(!st||r.status===st)&&(!q||(r.sheet+' '+r.row_label+' '+r.column_header+' '+r.where+' '+r.currency).toLowerCase().includes(q)));
+  t.innerHTML='<thead><tr><th></th><th>Source sheet</th><th>Cell</th><th>Row</th><th>Column</th><th>Amount</th><th>Same value at</th><th>Status</th><th>Found at</th></tr></thead><tbody>'+
+    rows.slice(0,1500).map(r=>`<tr class="${r.status==='NOT_FOUND'?'dmReview':''}"><td>${r.color?`<span class="swatch" style="background:#${esc(r.color)}"></span>`:''}</td>
+      <td data-tr="1">${esc(r.sheet)}</td><td><b>${esc(r.cell)}</b></td><td>${esc(r.row_label)}</td><td>${esc(r.column_header)}${r.currency?` <span class="muted">${esc(ccyLabel(r.currency))}</span>`:''}</td>
+      <td class="num">${esc(fmt(r.amount))}</td><td>${r.members>1?esc('+'+(r.members-1)+' more'):''}</td>
+      <td><span class="pill ${r.status==='NOT_FOUND'||r.status==='SKIPPED'?'NOT_FOUND':(r.status==='POSSIBLE'?'NO_RULE':'MATCH')}">${esc(ENG_STATUS[r.status])}</span>${r.method?` <span class="muted">${esc(r.method)}</span>`:''}${r.conflict_only?' <span class="muted">(other currency column)</span>':''}</td>
+      <td>${esc(r.where)}</td></tr>`).join('')+'</tbody>'+(rows.length>1500?`<tfoot><tr><td colspan="9" class="muted">${esc('Showing 1500 of '+rows.length+' - download the workbook for the full report.')}</td></tr></tfoot>`:'');
+}
+async function engBuildMapping(){
+  const j=await api('/api/engine/mapping',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.session,as_tb:$('engAsTb').checked,include_combinations:$('engCombos').checked})});
+  state.engine.mapping=j;
+  $('engMapMsg').innerHTML=`<div class="notice good"><span>${esc(`Mapping built: ${j.entries} source numbers (${j.direct} direct, ${j.combinations} combinations).`)}</span>${j.rules||$('engAsTb').checked?` <span>${esc(`${j.rules} default-mapping rules, ${j.added} of them new compared with the current default mapping.`)}</span>`:''}
+    ${(j.preview||[]).length?`<details style="margin-top:8px"><summary>${esc('Preview of the rules')}</summary><ul>${j.preview.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></details>`:''}</div>`;
+  $('engMapBtns').style.display='flex';
+}
+async function depthBuildMapping(){
+  const j=await api('/api/depth-search/mapping',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.session})});
+  $('depthMapMsg').innerHTML=`<div class="notice good">${esc(`${j.rules} default-mapping rules built from the hits, ${j.added} of them new compared with the current default mapping.`)}
+    ${(j.preview||[]).length?`<details style="margin-top:8px"><summary>${esc('Preview of the rules')}</summary><ul>${j.preview.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></details>`:''}</div>`;
+  $('btnDepthMapRules').style.display='inline-flex'; $('btnDepthMapMerged').style.display='inline-flex';
 }
 
 /* ---------------- Depth Search: TB pivot values -> every non-zero cell, every sheet ---------------- */
@@ -614,8 +699,9 @@ function depthHow(h){
 function renderDepthResults(){
   const box=$('depthResults'); if(!box) return;
   const j=state.depth, filt=$('depthFilter');
-  if(!j){ box.innerHTML=''; if(filt) filt.style.display='none'; $('btnDepthAll').style.display='none'; return; }
+  if(!j){ box.innerHTML=''; if(filt) filt.style.display='none'; $('btnDepthAll').style.display='none'; const mb0=$('depthMapBox'); if(mb0) mb0.style.display='none'; return; }
   if(filt) filt.style.display='block';
+  const mb=$('depthMapBox'); if(mb) mb.style.display='block';
   const q=(filt?.value||'').toLowerCase();
   $('btnDepthAll').style.display=j.files.some(f=>!f.skipped)?'inline-flex':'none';
   box.innerHTML=j.files.map(f=>{
@@ -1222,6 +1308,17 @@ const CLICK_ACTIONS={
   'extract-subs':(el)=>guarded(el,extractSubs),
   'download-submissions':(el)=>guarded(el,downloadSubmissions),
   'run-depth':(el)=>guarded(el,runDepth),
+  'eng-choose-src':()=>$('engSrcFile').click(),
+  'eng-choose-tg':()=>$('engTgFiles').click(),
+  'eng-read-src':(el)=>guarded(el,engReadSource),
+  'eng-read-tg':(el)=>guarded(el,engReadTargets),
+  'eng-run':(el)=>guarded(el,engRun),
+  'eng-mapping':(el)=>guarded(el,engBuildMapping),
+  'eng-download':(el)=>guarded(el,()=>downloadFile('/api/engine/download?session_id='+encodeURIComponent(state.session)+(el.dataset.kind==='source'?'&kind=source':'&file='+encodeURIComponent(el.dataset.file)),'DepthEngine.xlsx')),
+  'eng-download-all':(el)=>guarded(el,()=>downloadFile('/api/engine/download-all?session_id='+encodeURIComponent(state.session),'Depth_Engine_Outputs.zip')),
+  'eng-map-download':(el)=>guarded(el,()=>downloadFile('/api/engine/mapping-download?session_id='+encodeURIComponent(state.session)+'&kind='+encodeURIComponent(el.dataset.kind),'mapping.json')),
+  'depth-mapping':(el)=>guarded(el,depthBuildMapping),
+  'depth-map-download':(el)=>guarded(el,()=>downloadFile('/api/depth-search/mapping-download?session_id='+encodeURIComponent(state.session)+'&kind='+encodeURIComponent(el.dataset.kind),'mapping.json')),
   'dm-rerun':(el)=>guarded(el,rerunDefault),
   'dm-pdf':(el)=>guarded(el,downloadDefaultPdf),
   'dm-download':(el)=>guarded(el,()=>downloadFile('/api/default/download?session_id='+encodeURIComponent(state.session)+'&file='+encodeURIComponent(el.dataset.file),'DefaultMapping.xlsx')),
@@ -1302,6 +1399,7 @@ document.addEventListener('click',e=>{
 document.addEventListener('change',e=>{
   const el=e.target;
   if(el.id==='dmStatus'){ renderDefault(); return; }
+  if(el.id==='engStatus'){ renderEngTable(); return; }
   if(el.dataset.action==='obb-sheet'){ obbFill(null); return; }
   if(el.id==='obbDefFile'){ if(el.files[0]) loadObDefinition(el.files[0]); el.value=''; return; }
   if(el.dataset.action==='toggle-sheet'){
@@ -1341,6 +1439,7 @@ document.addEventListener('input',e=>{
   if(e.target.id==='coverageSearch') renderCoverageTable();
   if(e.target.id==='depthFilter') renderDepthResults();
   if(e.target.id==='dmFilter') renderDefault();
+  if(e.target.id==='engFilter') renderEngTable();
   if(e.target.id==='obbExcel') obCompareExcel();
 });
 
@@ -1415,7 +1514,7 @@ const AR_DICT={
 "Upload up to eight workbooks, then choose exactly which sheets to read into the reconciliation.": "ارفع حتى ثمانية مصنفات، ثم اختر بدقة الأوراق التي ستُقرأ ضمن التسوية.",
 "Select the submissions": "اختيار التقارير المقدّمة",
 "Assets, liabilities/capital, and other supporting submissions (max 8)": "الأصول والالتزامات/رأس المال وسائر التقارير الداعمة (بحد أقصى 8)",
-"Choose files": "اختيار ملفات",
+"Choose files": "اختر ملفات",
 "Inspect workbooks": "فحص المصنفات",
 "Arabic content detected": "تم اكتشاف محتوى عربي",
 "Choose the language you want to work in, then press Proceed.": "اختر اللغة التي تريد العمل بها، ثم اضغط «متابعة».",
@@ -1728,7 +1827,7 @@ const AR_DICT={
 "Amount search": "البحث بالمبلغ",
 "Sheets": "الأوراق",
 "Rows with invalid or blank Equ-IQD": "صفوف بمكافئ غير صالح أو فارغ",
-"Distinct values": "القيم المميزة",
+"Distinct values": "القيم المتمايزة",
 "Step 3 · Off-balance": "الخطوة 3 · خارج الميزانية",
 "Off-balance pivots (optional)": "جداول خارج الميزانية المحورية (اختياري)",
 "Optional: upload it after the Trial Balance and before the submissions. It is used only to reconcile the Off-balance (064) submission. The raw-data sheet and header row are found automatically, Equ-IQD is cleaned and validated, and two pivots are built. Depth Search then looks for their values in the Off-balance submission only, with the Bucket pivot searched on its Maturity sheet only.": "اختياري: ارفعه بعد ميزان المراجعة وقبل التقارير المقدّمة. يُستخدم فقط لتسوية تقرير خارج الميزانية (064). تُكتشف ورقة البيانات الخام وصف العناوين تلقائيًا، وتُنظَّف قيمة المكافئ بالدينار العراقي وتُراجع، ويُبنى جدولان محوريان. ثم يبحث البحث المتعمق عن قيمهما في تقرير خارج الميزانية فقط، ويُبحث في الجدول المحوري للفترات في ورقة الاستحقاق فقط.",
@@ -1830,7 +1929,73 @@ const AR_DICT={
 "Forex (non-IQD)": "العملات الأجنبية (غير الدينار)",
 "(depth search)": "(بحث متعمق)",
 "Depth search: pivot values found": "البحث المتعمق: قيم الجدول المحوري الموجودة",
-"Off-balance depth search: search EVERY value of Pivot 1 and Pivot 2 in every non-zero cell of the off-balance sheets (listed with the tag \"depth search\")": "بحث متعمق في خارج الميزانية: ابحث عن كل قيمة في الجدولين المحوريين 1 و2 في كل خلية غير صفرية في أوراق خارج الميزانية (تُدرج بالوسم \"بحث متعمق\")"
+"Off-balance depth search: search EVERY value of Pivot 1 and Pivot 2 in every non-zero cell of the off-balance sheets (listed with the tag \"depth search\")": "بحث متعمق في خارج الميزانية: ابحث عن كل قيمة في الجدولين المحوريين 1 و2 في كل خلية غير صفرية في أوراق خارج الميزانية (تُدرج بالوسم \"بحث متعمق\")",
+"Search Engine": "محرك البحث",
+"Take the numbers of any workbook (the source — mark the sheets), look for every one of them in other workbooks (the targets), and get annotated copies back. A number no single cell holds can be found as a combination of cells that add up to it (bucket search). What was found can be turned into a mapping and into default-mapping rules.": "خذ أرقام أي مصنف (المصدر — حدّد الأوراق)، وابحث عن كل رقم منها في مصنفات أخرى (الأهداف)، واحصل على نسخ مُعلَّمة. الرقم الذي لا تحمله خلية واحدة يمكن إيجاده كمجموعة خلايا يساوي مجموعها (بحث السلة). ويمكن تحويل ما وُجد إلى ربط وإلى قواعد ربط افتراضي.",
+"1 · Source file — the numbers to look for": "1 · ملف المصدر — الأرقام المطلوب البحث عنها",
+"2 · Target files — where to look": "2 · ملفات الهدف — أين نبحث",
+"3 · Search settings": "3 · إعدادات البحث",
+"4 · Mapping from what was found": "4 · ربط مبني على ما وُجد",
+"Drop the source workbook here": "أفلت مصنف المصدر هنا",
+"Its marked sheets supply the numbers to search for": "أوراقه المحددة تُزوّد الأرقام المطلوب البحث عنها",
+"Drop the target workbooks here": "أفلت مصنفات الهدف هنا",
+"Up to 8 files; every sheet is searched unless you untick it": "حتى 8 ملفات؛ تُبحث كل ورقة ما لم تُلغِ تحديدها",
+"Read the source file": "قراءة ملف المصدر",
+"Read the target files": "قراءة ملفات الهدف",
+"Mark the sheets whose numbers should be searched for.": "حدّد الأوراق التي يجب البحث عن أرقامها.",
+"Smallest number to search": "أصغر رقم يُبحث عنه",
+"Unit of the source numbers": "وحدة أرقام المصدر",
+"as the source sheet declares": "كما تعلن ورقة المصدر",
+"as written (x1)": "كما هي مكتوبة (×1)",
+"thousands (x1,000)": "آلاف (×1,000)",
+"millions (x1,000,000)": "ملايين (×1,000,000)",
+"Also try thousands / millions in the targets (x1,000, x1,000,000 and the reverse)": "جرّب أيضًا الآلاف / الملايين في الأهداف (×1,000 و×1,000,000 والعكس)",
+"Accept equal-and-opposite sign (x -1)": "اقبل الإشارة المساوية والمعاكسة (×-1)",
+"Bucket search: a number no single cell holds is looked for as a combination of cells that add up to it": "بحث السلة: الرقم الذي لا تحمله خلية واحدة يُبحث عنه كمجموعة خلايا يساوي مجموعها",
+"Cells per bucket (a column or row of a sheet; longer ones are searched in windows)": "عدد الخلايا في السلة (عمود أو صف في ورقة؛ الأطول يُبحث فيه بنوافذ)",
+"Largest combination (cells)": "أكبر مجموعة (خلايا)",
+"Bucket =": "السلة =",
+"columns and rows": "الأعمدة والصفوف",
+"columns only": "الأعمدة فقط",
+"rows only": "الصفوف فقط",
+"Time limit for the bucket search (seconds)": "المهلة الزمنية لبحث السلة (ثوانٍ)",
+"Run the search": "تشغيل البحث",
+"Source numbers": "أرقام المصدر",
+"Found in a single cell": "وُجد في خلية واحدة",
+"Found as a combination": "وُجد كمجموعة خلايا",
+"Found": "موجود",
+"Found as a combination of cells": "وُجد كمجموعة خلايا",
+"Not searched (time limit)": "لم يُبحث (انتهت المهلة)",
+"Filter the source numbers (row, column, sheet, where found…)": "تصفية أرقام المصدر (الصف، العمود، الورقة، موضع الوجود…)",
+"Download the annotated source": "تنزيل المصدر المُعلَّم",
+"Source sheet": "ورقة المصدر",
+"Same value at": "القيمة نفسها في",
+"Found at": "وُجد في",
+"source": "المصدر",
+"(other currency column)": "(عمود عملة أخرى)",
+"The source rows are BS-mapping groups (a Trial Balance pivot): also build default-mapping rules": "صفوف المصدر هي مجموعات ربط الميزانية (جدول محوري لميزان المراجعة): ابنِ أيضًا قواعد ربط افتراضي",
+"Include the numbers found as combinations in the rules": "ضمّن الأرقام الموجودة كمجموعات خلايا في القواعد",
+"Build the mapping": "بناء الربط",
+"Download the depth mapping (.json)": "تنزيل الربط المتعمق (.json)",
+"Download as default-mapping rules (.json)": "تنزيل كقواعد ربط افتراضي (.json)",
+"Download merged with the current default mapping": "تنزيل مدموجًا مع الربط الافتراضي الحالي",
+"Preview of the rules": "معاينة القواعد",
+"Turn what was found into default-mapping rules: every BS-mapping value located in a submission becomes a group rule (TB group + currency → sheet, row, column currency).": "حوّل ما وُجد إلى قواعد ربط افتراضي: كل قيمة ربط ميزانية وُجدت في تقرير مقدَّم تصبح قاعدة مجموعة (مجموعة ميزان المراجعة + العملة ← الورقة والصف وعملة العمود).",
+"Build default-mapping rules from these hits": "بناء قواعد ربط افتراضي من هذه النتائج",
+"Download the rules (.json)": "تنزيل القواعد (.json)",
+"Upload the source workbook.": "ارفع مصنف المصدر.",
+"Upload the target workbooks.": "ارفع مصنفات الهدف.",
+"Possible combination (could be a coincidence)": "مجموعة محتملة (قد تكون مصادفة)",
+"Possible combination": "مجموعة محتملة",
+"Possible combinations": "مجموعات محتملة",
+"Bucket search finds": "بحث السلة يجد",
+"neighbouring cells first, then any cells (knapsack)": "الخلايا المتجاورة أولًا ثم أي خلايا (حقيبة الظهر)",
+"neighbouring cells only (the children under a subtotal)": "الخلايا المتجاورة فقط (البنود تحت المجموع الفرعي)",
+"any cells (knapsack) only": "أي خلايا (حقيبة الظهر) فقط",
+"A combination counts as found when the expected number of coincidences is at most": "تُعدّ المجموعة موجودة عندما لا يزيد عدد المصادفات المتوقع على",
+"0.05 (strict)": "0.05 (صارم)",
+"0.2 (normal)": "0.2 (عادي)",
+"1 (loose)": "1 (متساهل)"
 };
 const AR_RULES=[
 [
@@ -2192,6 +2357,42 @@ const AR_RULES=[
 [
 "^Depth search: (\\d+) of (\\d+) pivot values found$",
 "البحث المتعمق: {1} من {2} قيمة محورية موجودة"
+],
+[
+"^Number check: (\\d+) of (\\d+) sheet numbers are explained by the pivots$",
+"فحص الأرقام: {1} من {2} رقمًا في الأوراق مفسَّر بالجداول المحورية"
+],
+[
+"^(\\d+) number(\\(s\\)) on the off-balance sheets are not explained by any pivot value$",
+"{1} رقم (أرقام) في أوراق خارج الميزانية لا تفسّره أي قيمة في الجداول المحورية"
+],
+[
+"^(\\d+) source numbers found here$",
+"{1} رقمًا من المصدر وُجد هنا"
+],
+[
+"^([\\d,]+) target cells searched in ([\\d.]+) s$",
+"تم البحث في {1} خلية هدف خلال {2} ث"
+],
+[
+"^Showing 1500 of (\\d+) - download the workbook for the full report\\.$",
+"عرض 1500 من {1} - نزّل المصنف للحصول على التقرير الكامل."
+],
+[
+"^Mapping built: (\\d+) source numbers \\((\\d+) direct, (\\d+) combinations\\)\\.",
+"تم بناء الربط: {1} رقمًا من المصدر ({2} مباشر، {3} مجموعات خلايا)."
+],
+[
+"^(\\d+) default-mapping rules, (\\d+) of them new compared with the current default mapping\\.$",
+"{1} قاعدة ربط افتراضي، منها {2} جديدة مقارنة بالربط الافتراضي الحالي."
+],
+[
+"^(\\d+) default-mapping rules built from the hits, (\\d+) of them new compared with the current default mapping\\.$",
+"تم بناء {1} قاعدة ربط افتراضي من النتائج، منها {2} جديدة مقارنة بالربط الافتراضي الحالي."
+],
+[
+"^Search done - (\\d+) of (\\d+) distinct numbers found$",
+"اكتمل البحث - وُجد {1} من {2} رقمًا متمايزًا"
 ]
 ].map(([src,tpl])=>[new RegExp(src),tpl]);
 const I18N_ATTRS=['placeholder','title','aria-label'];

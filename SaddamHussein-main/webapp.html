@@ -9,6 +9,7 @@
     <div class="step" data-page="subs"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M4 14v6h16v-6"/><path d="M12 3v11M7 9l5-5 5 5"/></svg></span><span class="stepLabel">Submissions</span></div>
     <div class="step" data-page="defaultmap"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8.5 9h7M8.5 13h7M8.5 17h4"/><path d="m15 15 1.5 1.5L19.5 13" /></svg></span><span class="stepLabel">Default Mapping</span></div>
     <div class="step" data-page="depth"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 10.5h5M10.5 8v5"/></svg></span><span class="stepLabel">Depth Search</span></div>
+    <div class="step" data-page="engine"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M7.5 10.5h6M10.5 7.5v6"/><path d="M4 21h5" /></svg></span><span class="stepLabel">Search Engine</span></div>
     <div class="step" data-page="mapping"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle class="dotc" cx="6" cy="6" r="2.2"/><circle class="dotc" cx="6" cy="18" r="2.2"/><circle class="dotc" cx="18" cy="12" r="2.2"/><path d="M8 7l8 4M8 17l8-4"/></svg></span><span class="stepLabel">Mapping Studio</span></div>
     <div class="step" data-page="coverage"><span class="stepIcon"><svg viewBox="0 0 24 24"><path d="M6 2h12v20H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></span><span class="stepLabel">Mapping Coverage</span></div>
     <div class="step" data-page="results"><span class="stepIcon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><path d="m8 12.5 2.6 2.6L16 9.6"/></svg></span><span class="stepLabel">Recon Results</span></div>
@@ -180,8 +181,63 @@
 <div class="actions"><button type="button" class="primary" id="btnDepthRun" data-action="run-depth">Run depth search</button>
   <button type="button" class="secondary" id="btnDepthAll" data-action="download-depth-all" style="display:none">Download all outputs (zip)</button></div>
 <div id="depthMessage"></div>
+<div id="depthMapBox" style="display:none;margin-top:14px"><div class="notice good" style="margin-bottom:10px">Turn what was found into default-mapping rules: every BS-mapping value located in a submission becomes a group rule (TB group + currency → sheet, row, column currency).</div>
+  <div class="actions"><button type="button" class="primary" data-action="depth-mapping">Build default-mapping rules from these hits</button>
+    <button type="button" class="secondary" id="btnDepthMapRules" data-action="depth-map-download" data-kind="rules" style="display:none">Download the rules (.json)</button>
+    <button type="button" class="secondary" id="btnDepthMapMerged" data-action="depth-map-download" data-kind="merged" style="display:none">Download merged with the current default mapping</button></div><div id="depthMapMsg"></div></div>
 <input class="search" id="depthFilter" placeholder="Filter results (TB item, sheet, cell, row label, column…)" style="display:none;margin-top:14px">
 <div id="depthResults"></div>
+</section>
+
+<section id="engine" class="page">
+<div class="title"><div><span class="kicker">Search</span><h2>Search Engine</h2><p>Take the numbers of any workbook (the source — mark the sheets), look for every one of them in other workbooks (the targets), and get annotated copies back. A number no single cell holds can be found as a combination of cells that add up to it (bucket search). What was found can be turned into a mapping and into default-mapping rules.</p></div></div>
+
+<h3 class="subhead">1 · Source file — the numbers to look for</h3>
+<div class="upload"><input id="engSrcFile" type="file" accept=".xlsx,.xlsm,.xls,.xlsb"><div class="uploadIcon"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div><h3>Drop the source workbook here</h3><p>Its marked sheets supply the numbers to search for</p><button type="button" class="secondary" data-action="eng-choose-src">Choose file</button></div>
+<div class="actions"><button type="button" class="primary" data-action="eng-read-src">Read the source file</button></div>
+<div id="engSrcSheets"></div>
+
+<h3 class="subhead">2 · Target files — where to look</h3>
+<div class="upload"><input id="engTgFiles" type="file" multiple accept=".xlsx,.xlsm,.xls,.xlsb"><div class="uploadIcon"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div><h3>Drop the target workbooks here</h3><p>Up to 8 files; every sheet is searched unless you untick it</p><button type="button" class="secondary" data-action="eng-choose-tg">Choose files</button></div>
+<div class="actions"><button type="button" class="primary" data-action="eng-read-tg">Read the target files</button></div>
+<div id="engTargets"></div>
+
+<h3 class="subhead">3 · Search settings</h3>
+<div class="depthSettings">
+  <label>Tolerance (absolute)<input id="engTol" type="number" value="1" min="0" step="any"></label>
+  <label>Smallest number to search<input id="engMin" type="number" value="1" min="0" step="any"></label>
+  <label>Unit of the source numbers<select id="engUnit"><option value="auto">as the source sheet declares</option><option value="1">as written (x1)</option><option value="1000">thousands (x1,000)</option><option value="1000000">millions (x1,000,000)</option></select></label>
+  <label class="check"><input id="engScale" type="checkbox" checked> Also try thousands / millions in the targets (x1,000, x1,000,000 and the reverse)</label>
+  <label class="check"><input id="engSign" type="checkbox" checked> Accept equal-and-opposite sign (x -1)</label>
+  <label class="check"><input id="engBucket" type="checkbox" checked> Bucket search: a number no single cell holds is looked for as a combination of cells that add up to it</label>
+  <label>Bucket search finds<select id="engMode"><option value="both">neighbouring cells first, then any cells (knapsack)</option><option value="run">neighbouring cells only (the children under a subtotal)</option><option value="subset">any cells (knapsack) only</option></select></label>
+  <label>A combination counts as found when the expected number of coincidences is at most<select id="engStrict"><option value="0.05">0.05 (strict)</option><option value="0.2" selected>0.2 (normal)</option><option value="1">1 (loose)</option></select></label>
+  <label>Cells per bucket (a column or row of a sheet; longer ones are searched in windows)<input id="engCells" type="number" value="20" min="4" max="40" step="1"></label>
+  <label>Largest combination (cells)<input id="engK" type="number" value="8" min="2" max="12" step="1"></label>
+  <label>Bucket = <select id="engScope"><option value="both">columns and rows</option><option value="column">columns only</option><option value="row">rows only</option></select></label>
+  <label>Time limit for the bucket search (seconds)<input id="engTime" type="number" value="90" min="5" step="5"></label>
+</div>
+<div class="actions"><button type="button" class="primary" data-action="eng-run">Run the search</button>
+  <button type="button" class="secondary" id="btnEngAll" data-action="eng-download-all" style="display:none">Download all outputs (zip)</button></div>
+<div id="engMessage"></div>
+<div id="engKpis" class="kpis"></div>
+<div id="engFiles"></div>
+<div id="engResultBox" style="display:none">
+  <div class="dmFilters"><input class="search" id="engFilter" placeholder="Filter the source numbers (row, column, sheet, where found…)">
+    <select id="engStatus"><option value="">All</option><option value="DIRECT">Found</option><option value="COMBINATION">Found as a combination</option><option value="POSSIBLE">Possible combination</option><option value="NOT_FOUND">Not found</option></select></div>
+  <div class="depthScroll"><table class="dmTable" id="engTable" style="min-width:900px"></table></div>
+  <h3 class="subhead">4 · Mapping from what was found</h3>
+  <div class="depthSettings">
+    <label class="check"><input id="engAsTb" type="checkbox" checked> The source rows are BS-mapping groups (a Trial Balance pivot): also build default-mapping rules</label>
+    <label class="check"><input id="engCombos" type="checkbox"> Include the numbers found as combinations in the rules</label>
+  </div>
+  <div class="actions"><button type="button" class="primary" data-action="eng-mapping">Build the mapping</button></div>
+  <div id="engMapMsg"></div>
+  <div class="actions" id="engMapBtns" style="display:none">
+    <button type="button" class="secondary" data-action="eng-map-download" data-kind="depth">Download the depth mapping (.json)</button>
+    <button type="button" class="secondary" data-action="eng-map-download" data-kind="rules">Download as default-mapping rules (.json)</button>
+    <button type="button" class="primary" data-action="eng-map-download" data-kind="merged">Download merged with the current default mapping</button></div>
+</div>
 </section>
 
 <section id="mapping" class="page">
