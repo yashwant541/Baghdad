@@ -141,6 +141,7 @@
   <label>Tolerance (absolute)<input id="dmTolAbs" type="number" value="1" min="0" step="any"></label>
   <label>Tolerance (% of the TB amount)<input id="dmTolPct" type="number" value="0.01" min="0" step="any"></label>
 </div>
+<div class="depthSettings"><label class="check"><input id="dmColSearch" type="checkbox" checked> When a rule's own row does not give the amount, search every cell of the matching currency column (EUR → the EUR column, IQD → columns 3 and 4, foreign → 5 and 6, Total → the total column) for that amount</label></div>
 <div class="depthSettings"><label class="check"><input id="dmObTb" type="checkbox"> Also compare the Trial Balance's OB- groups with the off-balance total (only if in doubt - the off-balance checks otherwise use the Outstanding Report only)</label></div>
 <div class="actions"><button type="button" class="secondary" data-action="dm-rerun">Re-run with these tolerances</button>
   <button type="button" class="primary" data-action="dm-pdf">Download PDF (all results)</button>
@@ -219,6 +220,7 @@
 </div>
 <div class="amountSearchBar">
   <button type="button" class="secondary" data-action="search-amount"><svg viewBox="0 0 24 24" class="btnIcon"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.3-4.3"/></svg> Search submissions for the TB selected total</button>
+  <label class="muted">Look in <select id="amountSearchCcy"><option value="auto">the column of the selected items' currency</option><option value="">every column</option></select></label>
   <span class="muted" id="amountSearchLabel">Select Trial Balance items first, then search for that total across every extracted sheet.</span>
 </div>
 <div id="amountSearchResults"></div>

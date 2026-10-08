@@ -13,6 +13,8 @@ Python 3.9 compatible.
 """
 import datetime
 import io
+import json
+import os
 import re
 import zipfile
 from collections import OrderedDict, defaultdict
@@ -24,7 +26,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.hyperlink import Hyperlink
 
 from .depth_search import PALETTE, _col_title, _fill, _sheet_ref, _unique_name, build_layout
-from .engine import FRX_CODE, LOCAL_CCY
+from .engine import FRX_CODE, LOCAL_CCY, text_similarity
 from .pdf_simple import SimplePDF, clean
 
 STATUS_TEXT = {"MATCH": "Match", "MATCH_WITHIN_TOLERANCE": "Match (within tolerance)",
@@ -277,6 +279,23 @@ def _ob_sheet_names(sub):
     return {"main": min(main, key=len) if main else None, "foreign": foreign, "maturity": maturity}
 
 
+def _norm_item(s):
+    """'GOODS/SERVICE G'TEE' and 'goods service g tee' are the same item."""
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def load_ob_row_groups():
+    """Sheet rows that gather several LC/GTEE items, e.g. 'For Other Purposes' = ADVANCE PAYMENT BOND + LTR OF INTENT + ...
+    (default_mapping.json -> "ob_row_groups": [{"row": ..., "items": [...]}])."""
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "default_mapping.json")
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return [g for g in (data.get("ob_row_groups") or []) if g.get("row") and g.get("items")]
+    except (OSError, ValueError):
+        return []
+
+
 def _sheet_columns(sub, sheet):
     """[(column letter, header text)] of the extracted cells of a sheet, left to right."""
     out = {}
@@ -324,10 +343,15 @@ def _bucket_columns(buckets, sheet_cols, total_letter):
     big = 1e9
     num = lambda v: big if v == float("inf") else v
     pair = {}
+    his = dict((b, _upper_bound_months(b)) for b in real)
+    for b in real:                                        # "1-5Y" (a range) and "5Y" (bare) both end at 60 months: the bare one is "5Y and over"
+        same = [x for x in real if his[x] is not None and his[x] == his[b] and his[b] != float("inf")]
+        if len(same) > 1 and not re.search(r"\d\s*(?:-|to)\s*\d", b, re.I) and any(re.search(r"\d\s*(?:-|to)\s*\d", x, re.I) for x in same):
+            his[b] = float("inf")
     hi_cols = [(L, _upper_bound_months(h)) for L, h in cols]
     if all(x[1] is not None for x in hi_cols):
         for b in real:
-            hb = _upper_bound_months(b)
+            hb = his[b]
             if hb is None:
                 continue
             best = None
@@ -360,7 +384,7 @@ def ob_templates(res, sub, notes, include_tb_ob=False):
                      "(upload it in the Off-Balance step, then press Re-run).")
         return [], None
     try:
-        from .outstanding_report import order_pivot_columns, BLANK, GRAND
+        from .outstanding_report import order_pivot_columns, BLANK, GRAND, FRX_COL
     except Exception:
         notes.append("The off-balance checks need the latest outstanding_report.py in the library.")
         return [], None
@@ -377,28 +401,47 @@ def ob_templates(res, sub, notes, include_tb_ob=False):
     d2 = prep(res["data2"] if res.get("data2") is not None else base_df)
     p2cols = list(res["pivot1"]["flat"]["columns"])                            # currency columns (Pivot 1)
     p1cols = list(res["pivot2"]["flat"]["columns"])                            # bucket columns (Pivot 2)
-    ccys = [c for c in p2cols if c != GRAND]
+    ccys = [c for c in p2cols if c not in (GRAND, FRX_COL)]
     total_name = "Total Off-Balance Sheet Accounts"
     cats = [c for c in order_pivot_columns(list(d2["CATEGORY"].unique()), "currency") if c not in (BLANK, "(all)")]
+    row_groups = load_ob_row_groups()
+    grouped = {}                                                      # normalised LC/GTEE item -> the sheet row that gathers it
+    for g in row_groups:
+        for it in g["items"]:
+            grouped[_norm_item(it)] = g["row"]
 
     def item_list(lc_src):
-        return ([("total", total_name)] + [("category", c) for c in cats] +
-                [("lc", x) for x in order_pivot_columns(list(lc_src["LC_GTEE_DESC"].unique()), "currency") if x != BLANK])
+        present = list(lc_src["LC_GTEE_DESC"].unique())
+        singles = [x for x in order_pivot_columns(present, "currency") if x != BLANK and _norm_item(x) not in grouped]
+        gl = []
+        for g in row_groups:
+            have = [x for x in present if _norm_item(x) in set(_norm_item(i) for i in g["items"])]
+            missing = [i for i in g["items"] if _norm_item(i) not in set(_norm_item(x) for x in present)]
+            if missing and have:
+                note = "'%s': not in the Outstanding Report (counted as zero): %s." % (g["row"], ", ".join(missing))
+                if note not in notes:
+                    notes.append(note)
+            if have or missing:
+                gl.append(("group", g["row"], [x for x in g["items"]]))
+        return ([("total", total_name)] + [("category", c) for c in cats] + [("lc", x) for x in singles] + gl)
 
     items_main, items_mat = item_list(d1), item_list(d2)
 
-    def rows_of(src, kind, name):
+    def rows_of(src, kind, name, items=None):
         if kind == "category":
             return src[src["CATEGORY"] == name]
         if kind == "lc":
             return src[src["LC_GTEE_DESC"] == name]
+        if kind == "group":
+            keys = set(_norm_item(i) for i in (items or []))
+            return src[src["LC_GTEE_DESC"].map(_norm_item).isin(keys)]
         return src
 
     out = []
 
-    def rule(label, ccy, kind, name, amount, sheet, ccy_sub, pivot, cols, letter=None):
+    def rule(label, ccy, kind, name, amount, sheet, ccy_sub, pivot, cols, letter=None, items=None):
         # `pivot` here: 2 = the currency pivot, 1 = the bucket pivot (the sheets are numbered the other way round)
-        mark = None if (kind == "category" and pivot == 2) else ["ob", {2: 1, 1: 2}[pivot], kind, name, list(cols)]
+        mark = None if (kind == "category" and pivot == 2) else ["ob", {2: 1, 1: 2}[pivot], kind, name, list(cols)] + ([list(items)] if items else [])
         shown = "Total" if kind == "total" else name
         side = {"match_text": name, "sheet": sheet, "currency": ccy_sub, "is_total": False, "sign": 1}
         if letter:
@@ -416,26 +459,42 @@ def ob_templates(res, sub, notes, include_tb_ob=False):
         has_iqd_col = "IQD" in sc
         direct = [c for c in sorted(sc) if c not in ("TOTAL", "IQD", FRX_CODE, "UNSPECIFIED") and not str(c).startswith("TOTAL_")]
         other_col = FRX_CODE in sc
-    for kind, name in items_main:
-        rows = rows_of(d2 if kind == "category" else d1, kind, name)
+    # An item gets its own checks on a sheet only when that sheet has a row of the same name (a row that merely sounds similar
+    # would give a false variance). The total and the configured row groups ('For Other Purposes') are always checked.
+    labels = {}
+    for key in ("main", "foreign", "maturity"):
+        labels[key] = sorted(set(str(x) for x in sub[sub.sheet == names[key]].line_description)) if names[key] else []
+    no_row = []
+
+    def present(kind, name, key):
+        if kind in ("total", "group"):
+            return True
+        ok = any(_norm_item(name) == _norm_item(l) or text_similarity(name, l) >= 0.85 for l in labels[key])
+        if not ok and name not in no_row:
+            no_row.append(name)
+        return ok
+
+    for entry in items_main:
+        kind, name = entry[0], entry[1]
+        gitems = entry[2] if len(entry) > 2 else None
+        rows = rows_of(d2 if kind == "category" else d1, kind, name, gitems)
         iq = float(rows[rows["BILL_CCY"] == LOCAL_CCY]["EQUI_IQD"].sum())
         fx = float(rows[rows["BILL_CCY"] != LOCAL_CCY]["EQUI_IQD"].sum())
         tt = float(rows["EQUI_IQD"].sum())
-        if names["main"]:
-            rule("IQD (column 3 or 4)", "IQD", kind, name, iq, names["main"], "IQD", 2, [LOCAL_CCY])
-            rule("foreign currencies (column 5 or 6)", FRX_CODE, kind, name, fx, names["main"], FRX_CODE, 2,
-                 [c for c in ccys if c != LOCAL_CCY])
-            rule("total (column 2)", "TOTAL", kind, name, tt, names["main"], "TOTAL", 2, [GRAND])
-        if names["foreign"]:
+        if names["main"] and present(kind, name, "main"):
+            rule("IQD (column 3 or 4)", "IQD", kind, name, iq, names["main"], "IQD", 2, [LOCAL_CCY], items=gitems)
+            rule("foreign currencies (column 5 or 6)", FRX_CODE, kind, name, fx, names["main"], FRX_CODE, 2, [FRX_COL], items=gitems)
+            rule("total (column 2)", "TOTAL", kind, name, tt, names["main"], "TOTAL", 2, [GRAND], items=gitems)
+        if names["foreign"] and present(kind, name, "foreign"):
             if has_iqd_col:
-                rule("by currency - IQD", "IQD", kind, name, iq, names["foreign"], "IQD", 2, [LOCAL_CCY])
+                rule("by currency - IQD", "IQD", kind, name, iq, names["foreign"], "IQD", 2, [LOCAL_CCY], items=gitems)
             for c in direct:
                 rule("by currency - %s" % c, c, kind, name, float(rows[rows["BILL_CCY"] == c]["EQUI_IQD"].sum()),
-                     names["foreign"], c, 2, [c])
+                     names["foreign"], c, 2, [c], items=gitems)
             if other_col:
                 rest = rows[(rows["BILL_CCY"] != LOCAL_CCY) & (~rows["BILL_CCY"].isin(direct))]
                 rule("by currency - Other Foreign Currencies", FRX_CODE, kind, name, float(rest["EQUI_IQD"].sum()), names["foreign"],
-                     FRX_CODE, 2, [c for c in ccys if c != LOCAL_CCY and c not in direct])
+                     FRX_CODE, 2, [c for c in ccys if c != LOCAL_CCY and c not in direct], items=gitems)
 
     # ---- maturity sheet (Pivot 1, Bucket columns)
     if names["maturity"]:
@@ -445,13 +504,22 @@ def ob_templates(res, sub, notes, include_tb_ob=False):
         pair, header_of, note = _bucket_columns(buckets, cols, total_letter)
         if note:
             notes.append(note)
-        for kind, name in items_mat:
-            rows = rows_of(d2, kind, name)
+        for entry in items_mat:
+            kind, name = entry[0], entry[1]
+            gitems = entry[2] if len(entry) > 2 else None
+            rows = rows_of(d2, kind, name, gitems)
+            if not present(kind, name, "maturity"):
+                continue
             if total_letter:
-                rule("maturity total", "TOTAL", kind, name, float(rows["EQUI_IQD"].sum()), names["maturity"], None, 1, [GRAND], total_letter)
+                rule("maturity total", "TOTAL", kind, name, float(rows["EQUI_IQD"].sum()), names["maturity"], None, 1, [GRAND], total_letter,
+                     items=gitems)
             for b, L in pair.items():
                 rule("bucket %s (column %s, %s)" % (b, L, header_of.get(L, "")), "TOTAL", kind, name,
-                     float(rows[rows["BUCKET"] == b]["EQUI_IQD"].sum()), names["maturity"], None, 1, [b], L)
+                     float(rows[rows["BUCKET"] == b]["EQUI_IQD"].sum()), names["maturity"], None, 1, [b], L, items=gitems)
+    if no_row:
+        notes.append("These Outstanding Report items have no row of the same name on the off-balance sheets, so they are not checked one by one "
+                     "(they are inside the totals): %s. If the sheet gathers some of them under one label, add that label and its items to "
+                     "\"ob_row_groups\" in default_mapping.json (like 'For Other Purposes')." % ", ".join(no_row))
     # OPTIONAL (off by default - the Trial Balance and the Outstanding Report are different sources): every OB- group of
     # the Trial Balance against the grand total of the off-balance sheets, in case the Outstanding Report is in doubt
     if include_tb_ob and names["main"]:
@@ -476,7 +544,45 @@ def _cells_text(components):
     return "; ".join("%s!%s" % (sh, "+".join(cells)) for (f, sh), cells in by.items())
 
 
-def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=False):
+VALUE_SEARCH_MIN = 10000.0          # smaller amounts are too likely to match a cell by coincidence
+
+
+def column_value_search(sub, side, tb_amt, tol):
+    """When a rule's own row does not give the amount, look at EVERY cell of the column that belongs to the rule's currency on
+    the rule's sheet (EUR -> the EUR column of the by-currency sheet, IQD -> columns 3 and 4, foreign -> 5 and 6, Total -> the
+    total column, a maturity bucket -> its column) and take the cell whose value equals the amount. Returns
+    (component, number of cells holding that value, opposite sign?) or None."""
+    if sub is None or not len(sub) or not side.get("sheet") or abs(tb_amt) < VALUE_SEARCH_MIN:
+        return None
+    pool = sub[sub.sheet == side["sheet"]]
+    ccy, letter, sg = side.get("currency"), side.get("column_letter"), side.get("sign", 1)
+    if ccy:
+        pool = pool[pool.currency == ccy]
+    if letter:
+        pool = pool[pool.source_cell.astype(str).str.match(r"^%s\d+$" % re.escape(str(letter).upper()))]
+    if not len(pool):
+        return None
+    text = side.get("match_text") or ""
+    cands = []
+    for r in pool.itertuples(index=False):
+        v = float(r.normalized_amount)
+        sc = float(getattr(r, "scale", 1.0) or 1.0)
+        allow = max(tol, 0.5 * sc if sc > 1 else 0.0)                 # figures stated in thousands carry +/- half a unit
+        for flip in (1, -1):
+            d = abs(v * sg * flip - tb_amt)
+            if d <= allow:
+                cands.append((flip != 1, -text_similarity(text, r.line_description), d, r, flip))
+    if not cands:
+        return None
+    cands.sort(key=lambda c: (c[0], c[1], c[2]))
+    _, _, _, r, flip = cands[0]
+    comp = {"submission_file": r.submission_file, "sheet": r.sheet, "row_number": int(r.row_number), "source_cell": r.source_cell,
+            "line_description": r.line_description, "currency": r.currency, "amount": float(r.normalized_amount), "multiplier": 1,
+            "sign": sg * flip, "match_confidence": 1.0, "by_value": True}
+    return comp, len(cands), flip == -1
+
+
+def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=False, col_search=True):
     templates = templates if templates is not None else eng.load_default_mapping()
     skipped = []
     concrete = expand_templates(templates, tb, sub, skipped)
@@ -515,6 +621,26 @@ def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=Fa
         else:
             status = "REVIEW_REQUIRED"
         notes = list(warnings)
+        by_value = False
+        if col_search and status in ("NOT_FOUND", "REVIEW_REQUIRED") and len(t.get("submission_side") or []) == 1:
+            hit = column_value_search(sub, t["submission_side"][0], tb_amt, tol)
+            if hit:
+                comp, n_hit, opposite = hit
+                was = ("its own row (%s) held %s" % (_cells_text(sbc), format(sub_amt, ",.2f"))) if sbc else "its own row was not found"
+                notes.insert(0, "Matched by value: searched every cell of the %s column(s) of '%s' and found %s in %s (row '%s')%s; %s." % (
+                    t["submission_side"][0].get("currency") or "chosen", comp["sheet"], format(tb_amt, ",.2f"), comp["source_cell"],
+                    comp["line_description"], (", %d cells hold this value, the closest row name was taken" % n_hit) if n_hit > 1 else "",
+                    was))
+                if opposite:
+                    notes.insert(1, "The cell holds the same amount with the opposite sign.")
+                sbc = [comp]
+                sub_amt = float(comp["amount"] * comp["sign"])
+                var = tb_amt - sub_amt
+                status = "MATCH" if abs(var) <= 1e-6 else ("MATCH_WITHIN_TOLERANCE" if abs(var) <= max(tol, 0.5 * float(
+                    scale_of.get((comp["submission_file"], comp["sheet"], comp["source_cell"]), 1.0))) else "REVIEW_REQUIRED")
+                resolved = dict(resolved)
+                resolved["components"] = sbc
+                by_value = True
         if rounding:
             notes.insert(0, "Variance is within the rounding of figures stated in thousands (+/- %s)." % format(allow, ",.0f"))
         results.append({
@@ -524,7 +650,7 @@ def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=Fa
             "files": sorted(set(c["submission_file"] for c in sbc)),
             "target_sheets": sorted(set(x.get("sheet") for x in t.get("submission_side", []) if x.get("sheet"))),
             "where": _cells_text(sbc), "tb_components": tbc, "components": sbc, "warnings": notes,
-            "tb_marks": resolved.get("tb_marks", []), "expanded": bool(t.get("_expanded")), "derived": bool(t.get("derived")), "ob": bool(t.get("ob")), "resolved": resolved,
+            "tb_marks": resolved.get("tb_marks", []), "expanded": bool(t.get("_expanded")), "derived": bool(t.get("derived")), "ob": bool(t.get("ob")), "by_value": by_value, "resolved": resolved,
             "wildcard": any(str(x.get("bs_mapping") or "").endswith("*") for x in (t.get("tb_side") or []) if x.get("level") == "group"),
             "n_tb": sum(1 for c in tbc if not c.get("placeholder")), "n_sub": sum(1 for c in sbc if not c.get("placeholder")),
             "color": ""})
@@ -576,7 +702,7 @@ def public_results(run):
     for r in run["results"]:
         out.append({k: r[k] for k in ("n", "label", "rule_type", "currency", "rule_text", "tb_amount", "sub_amount", "variance",
                                       "variance_pct", "status", "files", "target_sheets", "where", "warnings", "color",
-                                      "n_tb", "n_sub", "expanded", "derived")})
+                                      "n_tb", "n_sub", "expanded", "derived", "by_value")})
     return out
 
 
@@ -767,13 +893,15 @@ def _write_ob_pivots(wb, run, mine, bold, grey):
         for mk in r["tb_marks"]:
             if mk[0] != "ob":
                 continue
-            _, n, kind, name, colnames = mk
+            _, n, kind, name, colnames = mk[:5]
+            gkeys = set(_norm_item(i) for i in mk[5]) if len(mk) > 5 else set()
             ws, flat, nl = sheets[n]
             for i, row in enumerate(flat["rows"]):
                 lv, lab = row["level"], row["labels"]
                 hit = (kind == "total" and lv == "Grand Total") or \
                       (kind == "category" and n == 2 and lv == "Category" and lab[0] == name) or \
-                      (kind == "lc" and lv == "LC/GTEE" and (lab[1] if n == 2 else lab[0]) == name)
+                      (kind == "lc" and lv == "LC/GTEE" and (lab[1] if n == 2 else lab[0]) == name) or \
+                      (kind == "group" and lv == "LC/GTEE" and _norm_item(lab[1] if n == 2 else lab[0]) in gkeys)
                 if not hit:
                     continue
                 for cn in colnames:

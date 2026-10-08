@@ -1153,7 +1153,7 @@ class ReconEngine:
         wb.save(path); return path
 
     def search_amount(self, submissions, target, tolerance_abs=1.0, tolerance_pct=0.0001,
-                       scales=(1.0,1000.0,1000000.0,0.001,0.000001), signs=(1.0,-1.0)):
+                       scales=(1.0,1000.0,1000000.0,0.001,0.000001), signs=(1.0,-1.0), currency=None):
         """Reverse lookup: given a number (typically a TB-side club's total),
         find every submission line whose value equals it — at face value, or
         after a common scale factor and/or a sign flip — across every
@@ -1170,6 +1170,8 @@ class ReconEngine:
         for idx,row in submissions.iterrows():
             raw=float(row.normalized_amount)
             if raw==0 and target!=0: continue
+            # look only in the column(s) of one currency (EUR -> the EUR column ...; TOTAL -> every total column)
+            if currency and not (row.currency==currency or (currency=='TOTAL' and str(row.currency).startswith('TOTAL'))): continue
             best=None
             for scale in scales:
                 for sign in signs:

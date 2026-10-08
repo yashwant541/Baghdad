@@ -174,7 +174,7 @@ def submissions_search_amount():
     amount=body.get('amount')
     if amount is None:return jsonify({'ok':False,'error':'No amount given.'}),400
     eng=ReconEngine()
-    results=eng.search_amount(d['sub_df'],amount,body.get('tolerance_abs',1),body.get('tolerance_pct',0.0001))
+    results=eng.search_amount(d['sub_df'],amount,body.get('tolerance_abs',1),body.get('tolerance_pct',0.0001),currency=body.get('currency') or None)
     return jsonify({'ok':True,'results':results[:200],'total_found':len(results)})
 
 @app.route('/api/submissions/export',methods=['GET'])
@@ -212,7 +212,7 @@ def _run_default(d,eng):
         return matches,coverage,{'ok':False,'error':'The default-mapping report needs the latest bahrain_iraq_algorithm library '
                                  '(copy default_report.py, pdf_simple.py and engine.py into it, then restart the backend). Detail: %s'%DR_ERROR}
     run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'),
-                               ob_tb=bool((d.get('default_opts') or {}).get('ob_tb')))
+                               ob_tb=bool((d.get('default_opts') or {}).get('ob_tb')),col_search=(d.get('default_opts') or {}).get('col_search',True))
     d['default_run']=run
     for r in run['results']:
         if r.get('ob'): continue                 # off-balance checks live on the Default Mapping page, not in Mapping Studio
@@ -236,7 +236,7 @@ def _default_payload(d,run):
         read=sorted(set(sub[sub.submission_file==entry['label']].sheet)) if (sub is not None and len(sub)) else []
         files.append({'file':entry['label'],'summary':DR.summarise(mine),'rules':[r['n'] for r in mine],'sheets_read':read})
     return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files,'groups':run.get('groups',[]),'notes':run.get('notes',[]),
-            'options':{'ob_tb':bool((d.get('default_opts') or {}).get('ob_tb'))},
+            'options':{'ob_tb':bool((d.get('default_opts') or {}).get('ob_tb')),'col_search':(d.get('default_opts') or {}).get('col_search',True)},
             'ob_status':((d.get('outstanding') or {}).get('status'))}
 
 def _dm_unavailable():
@@ -256,9 +256,12 @@ def default_run():
     bad=_dm_ready(d)
     if bad: return bad
     eng=ReconEngine(float(body.get('tolerance_abs',1)),float(body.get('tolerance_pct',0.0001)))
-    if 'ob_tb' in body: d['default_opts']={'ob_tb':bool(body.get('ob_tb'))}
+    opts=dict(d.get('default_opts') or {})
+    if 'ob_tb' in body: opts['ob_tb']=bool(body.get('ob_tb'))
+    if 'col_search' in body: opts['col_search']=bool(body.get('col_search'))
+    d['default_opts']=opts
     run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'),
-                               ob_tb=bool((d.get('default_opts') or {}).get('ob_tb')))
+                               ob_tb=bool(opts.get('ob_tb')),col_search=opts.get('col_search',True))
     d['default_run']=run
     return jsonify(_default_payload(d,run))
 

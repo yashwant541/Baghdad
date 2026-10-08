@@ -24,6 +24,8 @@ from openpyxl.utils import get_column_letter
 
 BLANK = "(blank)"
 GRAND = "Grand Total"
+FRX_COL = "Forex (non-IQD)"       # Pivot 1: the sum of every currency except IQD, next to the Grand Total
+LOCAL = "IQD"
 MANDATORY = ("CATEGORY", "BILL_CCY", "LC_GTEE_DESC", "EQUI_IQD", "BUCKET")
 DISPLAY = {"CATEGORY": "CATEGORY", "BILL_CCY": "BILL_CCY", "LC_GTEE_DESC": "LC/GTEE DESC",
            "EQUI_IQD": "Equ-IQD", "BUCKET": "Bucket"}
@@ -383,17 +385,22 @@ def build_lcgtee_currency_pivot(df):
                         fill_value=0, margins=True, margins_name=GRAND, dropna=False)
     ccys = order_pivot_columns(list(d["BILL_CCY"].unique()), "currency")
     rows = []
+
+    def with_forex(v):
+        """the currency columns, then the Forex column (every currency except IQD); the total counts each amount once"""
+        return v + [float(sum(x for c, x in zip(ccys, v) if c != LOCAL))]
+
     for lc in _sorted_text(list(d["LC_GTEE_DESC"].unique())):
         s = d[d["LC_GTEE_DESC"] == lc].groupby("BILL_CCY")["EQUI_IQD"].sum()
         v = [float(s.get(c, 0.0)) for c in ccys]
-        rows.append({"level": "LC/GTEE", "labels": [lc], "ccy": "TOTAL", "values": v, "total": float(sum(v))})
+        rows.append({"level": "LC/GTEE", "labels": [lc], "ccy": "TOTAL", "values": with_forex(v), "total": float(sum(v))})
     s = d.groupby("BILL_CCY")["EQUI_IQD"].sum()
     v = [float(s.get(c, 0.0)) for c in ccys]
-    rows.append({"level": "Grand Total", "labels": [GRAND], "ccy": "TOTAL", "values": v, "total": float(sum(v))})
+    rows.append({"level": "Grand Total", "labels": [GRAND], "ccy": "TOTAL", "values": with_forex(v), "total": float(sum(v))})
     return {"pandas": pv, "grand_total": float(pv.iloc[-1, -1]),
             "flat": {"title": "Equ-IQD by LC/GTEE Description and Billing Currency",
-                     "label_cols": [DISPLAY["LC_GTEE_DESC"]], "columns": ccys + [GRAND], "rows": rows,
-                     "category": None, "column_ccy": ccys + ["TOTAL"]}}
+                     "label_cols": [DISPLAY["LC_GTEE_DESC"]], "columns": ccys + [FRX_COL, GRAND], "rows": rows,
+                     "category": None, "column_ccy": ccys + ["FRX", "TOTAL"]}}
 
 
 # ------------------------------------------------------------------------------ driver

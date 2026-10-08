@@ -2,6 +2,17 @@
  "format": "bahrain-iraq-recon-mapping",
  "version": 2,
  "generated_from": "user default mapping, updated per 'Default_Mapping_Review_New.xlsx' and 'Iraq Changes.docx'",
+ "ob_row_groups": [
+  {
+   "row": "For Other Purposes",
+   "items": [
+    "ADVANCE PAYMENT BOND",
+    "LTR OF INTENT",
+    "OTHERS - CGT (TXN)",
+    "GOODS/SERVICE G'TEE"
+   ]
+  }
+ ],
  "matches": [
   {
    "label": "A-CBI + A-CRR Matches with Balances with the Central Bank (First + Second) According to Schedule No 3",

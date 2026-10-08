@@ -440,7 +440,7 @@ async function extractSubs(){
     {key:'hierarchy_path',label:'Section'},{key:'line_description',label:'Line description'},
     {key:'currency',label:'Currency'},{key:'is_total',label:'Total row?',render:v=>v?'<span class="pill MATCH">TOTAL</span>':''},
     {key:'normalized_amount',label:'Amount'}]);
-  renderSuggestions(); renderSubPicker(); renderTbPicker(); renderManualMatches(); renderCoverage();
+  renderSuggestions(); renderSubPicker(); renderTbPicker(); renderManualMatches(); renderCoverage(); fillAmountSearchCcy();
   setStatus('Submissions extracted'); go('defaultmap');
 }
 // a plain `window.location = url` download works in a normal browser tab,
@@ -498,7 +498,7 @@ function renderDefault(){
   if(j&&!j.ok){ $('dmPrereq').style.display='block'; $('dmPrereq').textContent=j.error||'The default mapping could not be run.'; return; }
   if(!ready){ box.innerHTML=''; return; }
   const all=j.results, s=j.summary;
-  $('dmObTb').checked=!!(j.options&&j.options.ob_tb);
+  $('dmObTb').checked=!!(j.options&&j.options.ob_tb); $('dmColSearch').checked=!(j.options&&j.options.col_search===false);
   $('dmKpis').innerHTML=[['Rules applied',s.rules,''],['Match',s.MATCH,''],['Match (within tolerance)',s.MATCH_WITHIN_TOLERANCE,''],
       ['Variance - review',s.REVIEW_REQUIRED,s.REVIEW_REQUIRED?' bad':''],['Not found',s.NOT_FOUND,'']]
     .map(([l,v,c])=>`<div class="kpi dmKpi${c}"><small>${esc(l)}</small><b>${esc(v)}</b></div>`).join('');
@@ -510,7 +510,7 @@ function renderDefault(){
   const keep=r=>(!st||r.status===st)&&(!q||(r.label+' '+r.rule_text+' '+r.where+' '+(r.files||[]).join(' ')).toLowerCase().includes(q));
   const rowsHtml=rs=>rs.filter(keep).map(r=>`<tr class="${r.status==='REVIEW_REQUIRED'?'dmReview':''}">
       <td>${r.color?`<span class="swatch" style="background:#${esc(r.color)}"></span>`:''}</td><td>${esc(r.n)}</td>
-      <td data-tr="1"><b>${esc(r.label)}</b> <span class="muted">${esc(ccyLabel(r.currency))}</span></td><td class="how">${esc(r.rule_text)}</td>
+      <td data-tr="1"><b>${esc(r.label)}</b> <span class="muted">${esc(ccyLabel(r.currency))}</span>${r.by_value?' <span class="chip chipClub" title="The rule\'s own row did not give the amount; it was found by searching the whole currency column">Found by value</span>':''}</td><td class="how">${esc(r.rule_text)}</td>
       <td class="num">${esc(fmt(r.tb_amount))}</td><td class="num">${esc(fmt(r.sub_amount))}</td>
       <td class="num ${r.status==='REVIEW_REQUIRED'?'bad':''}">${esc(fmt(r.variance))}</td><td class="num">${esc(dmPct(r.variance_pct))}</td>
       <td><span class="pill ${r.status}">${esc(DM_STATUS[r.status])}</span></td>
@@ -545,7 +545,7 @@ async function rerunDefault(){
   const num=(id,def)=>{const v=parseFloat($(id).value); return isNaN(v)?def:v};
   setStatus('Re-running the default mapping');
   const j=await api('/api/default/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    session_id:state.session,tolerance_abs:num('dmTolAbs',1),tolerance_pct:num('dmTolPct',0.01)/100,ob_tb:$('dmObTb').checked})});
+    session_id:state.session,tolerance_abs:num('dmTolAbs',1),tolerance_pct:num('dmTolPct',0.01)/100,ob_tb:$('dmObTb').checked,col_search:$('dmColSearch').checked})});
   state.defaultRun=j; renderDefault();
   setStatus(`Default mapping: ${j.summary.REVIEW_REQUIRED} variance(s) to review`);
 }
@@ -921,6 +921,12 @@ function updateMatchPreview(){
    into every extracted submission line, across every sheet/file, not just
    whatever's currently filtered in the picker. ---------------- */
 
+function fillAmountSearchCcy(){
+  const sel=$('amountSearchCcy'); if(!sel) return;
+  const cur=sel.value, set=[...new Set((state.subPreview||[]).map(r=>r.currency).filter(Boolean))].sort();
+  sel.innerHTML=`<option value="auto">the column of the selected items' currency</option><option value="">every column</option>`+set.map(c=>`<option value="${esc(c)}">${esc(ccyLabel(c))} column(s) only</option>`).join('');
+  if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
+}
 function updateAmountSearchLabel(){
   const lbl=$('amountSearchLabel'); if(!lbl) return;
   const tbSel=collectSelectedTbAccounts();
@@ -933,9 +939,12 @@ async function searchAmount(){
   if(!tbSel.length){toast('Select Trial Balance items first');return}
   if(!state.subPreview.length){toast('Extract submission sheets first');return}
   const amount=tbSel.reduce((a,it)=>a+it.amount,0);
-  setStatus('Searching submissions for '+fmt(amount));
+  // 'auto': when every selected item has the same currency (EUR, USD, FRX = foreign ...), look only in that currency's column(s)
+  let ccy=$('amountSearchCcy').value;
+  if(ccy==='auto'){ const set=new Set(tbSel.map(it=>it.currency||'')); ccy=(set.size===1&&[...set][0])?[...set][0]:''; }
+  setStatus('Searching submissions for '+fmt(amount)+(ccy?' in the '+ccy+' column(s)':''));
   const j=await api('/api/submissions/search-amount',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({session_id:state.session,amount,tolerance_abs:+$('tolAbs').value||1,tolerance_pct:+$('tolPct').value||0.0001})});
+    body:JSON.stringify({session_id:state.session,amount,currency:ccy,tolerance_abs:+$('tolAbs').value||1,tolerance_pct:+$('tolPct').value||0.0001})});
   state.amountSearchResults=j.results||[]; state.amountSearchAdded=new Set();
   state.amountSearchTarget=amount; state.amountSearchTotalFound=j.total_found||0;
   renderAmountSearchResults();
@@ -1807,7 +1816,13 @@ const AR_DICT={
 "Definition loaded - press Build pivots": "تم تحميل التعريف - اضغط بناء الجداول المحورية",
 "Draft pivots built - check the totals, then approve": "تم بناء الجداول المسودة - راجع الإجماليات ثم اعتمد",
 "Not a number": "ليس رقمًا",
-"(none)": "(بلا)"
+"(none)": "(بلا)",
+"When a rule's own row does not give the amount, search every cell of the matching currency column (EUR → the EUR column, IQD → columns 3 and 4, foreign → 5 and 6, Total → the total column) for that amount": "عندما لا يعطي صف القاعدة نفسه المبلغ، ابحث في كل خلية من عمود العملة المطابق (EUR ← عمود EUR، IQD ← العمودان 3 و4، الأجنبي ← 5 و6، الإجمالي ← عمود الإجمالي) عن ذلك المبلغ",
+"Found by value": "وُجد بالقيمة",
+"Look in": "ابحث في",
+"the column of the selected items' currency": "عمود عملة البنود المحددة",
+"every column": "كل الأعمدة",
+"Forex (non-IQD)": "العملات الأجنبية (غير الدينار)"
 };
 const AR_RULES=[
 [
@@ -2157,6 +2172,14 @@ const AR_RULES=[
 [
 "^Saved in the library: (.+) - it runs automatically on the next Outstanding Report$",
 "تم الحفظ في المكتبة: {1} - يعمل تلقائيًا على تقرير الأرصدة القائمة التالي"
+],
+[
+"^(.+) column\\(s\\) only$",
+"عمود (أعمدة) {1} فقط"
+],
+[
+"^These Outstanding Report items have no row of the same name on the off-balance sheets, so they are not checked one by one \\(they are inside the totals\\): (.+)\\. If the sheet gathers some of them under one label, add that label and its items to \\\"ob_row_groups\\\" in default_mapping\\.json \\(like 'For Other Purposes'\\)\\.$",
+"ليس لهذه البنود في تقرير الأرصدة القائمة صف بالاسم نفسه في أوراق خارج الميزانية، لذلك لا تُفحص بندًا بندًا (هي داخل الإجماليات): {1}. إذا جمعت الورقة بعضها تحت تسمية واحدة، أضف التسمية وبنودها إلى \"ob_row_groups\" في default_mapping.json (مثل 'For Other Purposes')."
 ]
 ].map(([src,tpl])=>[new RegExp(src),tpl]);
 const I18N_ATTRS=['placeholder','title','aria-label'];
