@@ -186,6 +186,9 @@ def submissions_export():
     eng.export_submissions(d['sub_df'],path)
     return xlsx_response(path,'Submissions_Simplified.xlsx')
 
+def _sources(d):
+    return dict((e['label'],e['path']) for e in d.get('sub_files',[]))
+
 def _strip_placeholders(resolved):
     r=dict(resolved)
     r['tb_components']=[c for c in (resolved.get('tb_components') or []) if not c.get('placeholder')]
@@ -212,7 +215,8 @@ def _run_default(d,eng):
         return matches,coverage,{'ok':False,'error':'The default-mapping report needs the latest bahrain_iraq_algorithm library '
                                  '(copy default_report.py, pdf_simple.py and engine.py into it, then restart the backend). Detail: %s'%DR_ERROR}
     run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'),
-                               ob_tb=bool((d.get('default_opts') or {}).get('ob_tb')),col_search=(d.get('default_opts') or {}).get('col_search',True))
+                               ob_tb=bool((d.get('default_opts') or {}).get('ob_tb')),col_search=(d.get('default_opts') or {}).get('col_search',True),sources=_sources(d),
+                               ob_depth=(d.get('default_opts') or {}).get('ob_depth',True))
     d['default_run']=run
     for r in run['results']:
         if r.get('ob'): continue                 # off-balance checks live on the Default Mapping page, not in Mapping Studio
@@ -236,7 +240,7 @@ def _default_payload(d,run):
         read=sorted(set(sub[sub.submission_file==entry['label']].sheet)) if (sub is not None and len(sub)) else []
         files.append({'file':entry['label'],'summary':DR.summarise(mine),'rules':[r['n'] for r in mine],'sheets_read':read})
     return {'ok':True,'results':DR.public_results(run),'summary':run['summary'],'params':run['params'],'files':files,'groups':run.get('groups',[]),'notes':run.get('notes',[]),
-            'options':{'ob_tb':bool((d.get('default_opts') or {}).get('ob_tb')),'col_search':(d.get('default_opts') or {}).get('col_search',True)},
+            'options':{'ob_tb':bool((d.get('default_opts') or {}).get('ob_tb')),'col_search':(d.get('default_opts') or {}).get('col_search',True),'ob_depth':(d.get('default_opts') or {}).get('ob_depth',True)},
             'ob_status':((d.get('outstanding') or {}).get('status'))}
 
 def _dm_unavailable():
@@ -259,9 +263,11 @@ def default_run():
     opts=dict(d.get('default_opts') or {})
     if 'ob_tb' in body: opts['ob_tb']=bool(body.get('ob_tb'))
     if 'col_search' in body: opts['col_search']=bool(body.get('col_search'))
+    if 'ob_depth' in body: opts['ob_depth']=bool(body.get('ob_depth'))
     d['default_opts']=opts
     run=DR.run_default_mapping(eng,d['tb'],d['sub_df'],outstanding=(d.get('outstanding') or {}).get('result'),
-                               ob_tb=bool(opts.get('ob_tb')),col_search=opts.get('col_search',True))
+                               ob_tb=bool(opts.get('ob_tb')),col_search=opts.get('col_search',True),sources=_sources(d),
+                               ob_depth=opts.get('ob_depth',True))
     d['default_run']=run
     return jsonify(_default_payload(d,run))
 

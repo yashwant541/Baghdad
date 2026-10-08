@@ -482,13 +482,17 @@ function dmRulesFor(file,all){
   return all.filter(r=>(r.files||[]).includes(file)||(!(r.files||[]).length&&(r.target_sheets||[]).some(s=>sheets.has(s))));
 }
 function dmSummary(rs){
-  const s={rules:rs.length,MATCH:0,MATCH_WITHIN_TOLERANCE:0,REVIEW_REQUIRED:0,NOT_FOUND:0,abs:0};
-  rs.forEach(r=>{ s[r.status]++; if(r.status==='REVIEW_REQUIRED'||r.status==='MATCH_WITHIN_TOLERANCE') s.abs+=Math.abs(r.variance); });
+  const rules=rs.filter(r=>!r.depth), dp=rs.filter(r=>r.depth);
+  const s={rules:rules.length,MATCH:0,MATCH_WITHIN_TOLERANCE:0,REVIEW_REQUIRED:0,NOT_FOUND:0,abs:0,
+    depth:{values:dp.length,found:dp.filter(r=>r.status==='MATCH'||r.status==='MATCH_WITHIN_TOLERANCE').length,review:dp.filter(r=>r.status==='REVIEW_REQUIRED').length,not_found:dp.filter(r=>r.status==='NOT_FOUND').length}};
+  rules.forEach(r=>{ s[r.status]++; if(r.status==='REVIEW_REQUIRED'||r.status==='MATCH_WITHIN_TOLERANCE') s.abs+=Math.abs(r.variance); });
   return s;
 }
 function dmChips(s){
+  const d=s.depth||{};
   return [`${s.rules} rules`,`${s.MATCH+s.MATCH_WITHIN_TOLERANCE} matched`,`${s.REVIEW_REQUIRED} with a variance to review`,`${s.NOT_FOUND} not found`]
-    .map(c=>`<span class="chip">${esc(c)}</span>`).join('');
+    .map(c=>`<span class="chip">${esc(c)}</span>`).join('')
+    +(d.values?`<span class="chip chipClub" data-tr="1">${esc(`Depth search: ${d.found} of ${d.values} pivot values found`)}</span>`:'');
 }
 function renderDefault(){
   const j=state.defaultRun, box=$('dmFiles'); if(!box) return;
@@ -498,9 +502,10 @@ function renderDefault(){
   if(j&&!j.ok){ $('dmPrereq').style.display='block'; $('dmPrereq').textContent=j.error||'The default mapping could not be run.'; return; }
   if(!ready){ box.innerHTML=''; return; }
   const all=j.results, s=j.summary;
-  $('dmObTb').checked=!!(j.options&&j.options.ob_tb); $('dmColSearch').checked=!(j.options&&j.options.col_search===false);
+  $('dmObTb').checked=!!(j.options&&j.options.ob_tb); $('dmColSearch').checked=!(j.options&&j.options.col_search===false); $('dmObDepth').checked=!(j.options&&j.options.ob_depth===false);
   $('dmKpis').innerHTML=[['Rules applied',s.rules,''],['Match',s.MATCH,''],['Match (within tolerance)',s.MATCH_WITHIN_TOLERANCE,''],
-      ['Variance - review',s.REVIEW_REQUIRED,s.REVIEW_REQUIRED?' bad':''],['Not found',s.NOT_FOUND,'']]
+      ['Variance - review',s.REVIEW_REQUIRED,s.REVIEW_REQUIRED?' bad':''],['Not found',s.NOT_FOUND,'']].concat(
+      (s.depth&&s.depth.values)?[['Depth search: pivot values found',s.depth.found+' / '+s.depth.values,s.depth.review?' bad':'']]:[])
     .map(([l,v,c])=>`<div class="kpi dmKpi${c}"><small>${esc(l)}</small><b>${esc(v)}</b></div>`).join('');
   const nf=all.filter(r=>r.status==='NOT_FOUND').length;
   const note=$('dmNote');
@@ -545,7 +550,7 @@ async function rerunDefault(){
   const num=(id,def)=>{const v=parseFloat($(id).value); return isNaN(v)?def:v};
   setStatus('Re-running the default mapping');
   const j=await api('/api/default/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    session_id:state.session,tolerance_abs:num('dmTolAbs',1),tolerance_pct:num('dmTolPct',0.01)/100,ob_tb:$('dmObTb').checked,col_search:$('dmColSearch').checked})});
+    session_id:state.session,tolerance_abs:num('dmTolAbs',1),tolerance_pct:num('dmTolPct',0.01)/100,ob_tb:$('dmObTb').checked,col_search:$('dmColSearch').checked,ob_depth:$('dmObDepth').checked})});
   state.defaultRun=j; renderDefault();
   setStatus(`Default mapping: ${j.summary.REVIEW_REQUIRED} variance(s) to review`);
 }
@@ -1822,7 +1827,10 @@ const AR_DICT={
 "Look in": "ابحث في",
 "the column of the selected items' currency": "عمود عملة البنود المحددة",
 "every column": "كل الأعمدة",
-"Forex (non-IQD)": "العملات الأجنبية (غير الدينار)"
+"Forex (non-IQD)": "العملات الأجنبية (غير الدينار)",
+"(depth search)": "(بحث متعمق)",
+"Depth search: pivot values found": "البحث المتعمق: قيم الجدول المحوري الموجودة",
+"Off-balance depth search: search EVERY value of Pivot 1 and Pivot 2 in every non-zero cell of the off-balance sheets (listed with the tag \"depth search\")": "بحث متعمق في خارج الميزانية: ابحث عن كل قيمة في الجدولين المحوريين 1 و2 في كل خلية غير صفرية في أوراق خارج الميزانية (تُدرج بالوسم \"بحث متعمق\")"
 };
 const AR_RULES=[
 [
@@ -2180,6 +2188,10 @@ const AR_RULES=[
 [
 "^These Outstanding Report items have no row of the same name on the off-balance sheets, so they are not checked one by one \\(they are inside the totals\\): (.+)\\. If the sheet gathers some of them under one label, add that label and its items to \\\"ob_row_groups\\\" in default_mapping\\.json \\(like 'For Other Purposes'\\)\\.$",
 "ليس لهذه البنود في تقرير الأرصدة القائمة صف بالاسم نفسه في أوراق خارج الميزانية، لذلك لا تُفحص بندًا بندًا (هي داخل الإجماليات): {1}. إذا جمعت الورقة بعضها تحت تسمية واحدة، أضف التسمية وبنودها إلى \"ob_row_groups\" في default_mapping.json (مثل 'For Other Purposes')."
+],
+[
+"^Depth search: (\\d+) of (\\d+) pivot values found$",
+"البحث المتعمق: {1} من {2} قيمة محورية موجودة"
 ]
 ].map(([src,tpl])=>[new RegExp(src),tpl]);
 const I18N_ATTRS=['placeholder','title','aria-label'];

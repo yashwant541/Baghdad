@@ -98,7 +98,7 @@ def currency_check(target_ccy, cell_ccy):
     classify is UNKNOWN (kept and highlighted); a definite clash is CONFLICT (listed, not highlighted)."""
     if cell_ccy is None:
         return "UNKNOWN"
-    if target_ccy == "TOTAL" or cell_ccy == "TOTAL":
+    if target_ccy == "TOTAL" or cell_ccy in ("TOTAL", "BUCKET"):      # a maturity-bucket column holds every currency
         return "OK"
     if target_ccy == FRX_CODE:
         return "CONFLICT" if cell_ccy == LOCAL_CCY else "OK"

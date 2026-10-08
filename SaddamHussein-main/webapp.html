@@ -142,6 +142,7 @@
   <label>Tolerance (% of the TB amount)<input id="dmTolPct" type="number" value="0.01" min="0" step="any"></label>
 </div>
 <div class="depthSettings"><label class="check"><input id="dmColSearch" type="checkbox" checked> When a rule's own row does not give the amount, search every cell of the matching currency column (EUR → the EUR column, IQD → columns 3 and 4, foreign → 5 and 6, Total → the total column) for that amount</label></div>
+<div class="depthSettings"><label class="check"><input id="dmObDepth" type="checkbox" checked> Off-balance depth search: search EVERY value of Pivot 1 and Pivot 2 in every non-zero cell of the off-balance sheets (listed with the tag "depth search")</label></div>
 <div class="depthSettings"><label class="check"><input id="dmObTb" type="checkbox"> Also compare the Trial Balance's OB- groups with the off-balance total (only if in doubt - the off-balance checks otherwise use the Outstanding Report only)</label></div>
 <div class="actions"><button type="button" class="secondary" data-action="dm-rerun">Re-run with these tolerances</button>
   <button type="button" class="primary" data-action="dm-pdf">Download PDF (all results)</button>

@@ -459,6 +459,10 @@ def ob_templates(res, sub, notes, include_tb_ob=False):
         has_iqd_col = "IQD" in sc
         direct = [c for c in sorted(sc) if c not in ("TOTAL", "IQD", FRX_CODE, "UNSPECIFIED") and not str(c).startswith("TOTAL_")]
         other_col = FRX_CODE in sc
+        # the major currencies always get their own check, even when the sheet's header for them is not recognised: the value
+        # search then looks through the unrecognised columns instead of the currency silently dropping into "Other"
+        pivot_ccys = set(d1["BILL_CCY"].unique()) | set(d2["BILL_CCY"].unique())
+        direct += [c for c in ("USD", "EUR", "GBP") if c in pivot_ccys and c not in direct]
     # An item gets its own checks on a sheet only when that sheet has a row of the same name (a row that merely sounds similar
     # would give a false variance). The total and the configured row groups ('For Other Purposes') are always checked.
     labels = {}
@@ -547,22 +551,107 @@ def _cells_text(components):
 VALUE_SEARCH_MIN = 10000.0          # smaller amounts are too likely to match a cell by coincidence
 
 
-def column_value_search(sub, side, tb_amt, tol):
-    """When a rule's own row does not give the amount, look at EVERY cell of the column that belongs to the rule's currency on
-    the rule's sheet (EUR -> the EUR column of the by-currency sheet, IQD -> columns 3 and 4, foreign -> 5 and 6, Total -> the
-    total column, a maturity bucket -> its column) and take the cell whose value equals the amount. Returns
-    (component, number of cells holding that value, opposite sign?) or None."""
+def _cell_comp(r, sign):
+    return {"submission_file": r.submission_file, "sheet": r.sheet, "row_number": int(r.row_number), "source_cell": r.source_cell,
+            "line_description": r.line_description, "currency": r.currency, "amount": float(r.normalized_amount), "multiplier": 1,
+            "sign": sign, "match_confidence": 1.0, "by_value": True}
+
+
+def _raw_sheet_cells(path, sheet):
+    """Every numeric cell of a sheet read straight from the workbook: (cell, row number, row label, value)."""
+    out = []
+    try:
+        ws = load_workbook(path, read_only=True, data_only=True)[sheet]
+        for r, row in enumerate(ws.iter_rows(), 1):
+            label = next((str(c.value).strip() for c in row if isinstance(getattr(c, "value", None), str) and len(str(c.value).strip()) > 2), "")
+            for c in row:
+                v = getattr(c, "value", None)
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v:
+                    out.append((c.coordinate, r, label, float(v)))
+    except Exception:
+        return []
+    return out
+
+
+_SERIAL_CACHE = {}
+
+
+def _serial_rows(sources, file_label, sheet):
+    """Row numbers whose first column holds a serial number (1, 2, 3 ...): the top-level lines of a CBI statement."""
+    path = (sources or {}).get(file_label)
+    if not path:
+        return set()
+    try:
+        st = os.stat(path)
+        key = (path, sheet, st.st_mtime_ns, st.st_size)       # a re-uploaded file under the same name is read again
+    except OSError:
+        return set()
+    if key not in _SERIAL_CACHE:
+        rows = set()
+        try:
+            ws = load_workbook(path, read_only=True, data_only=True)[sheet]
+            for r, row in enumerate(ws.iter_rows(min_col=1, max_col=1), 1):
+                v = getattr(row[0], "value", None) if row else None
+                if (isinstance(v, (int, float)) and not isinstance(v, bool)) or (isinstance(v, str) and v.strip().isdigit()):
+                    rows.add(r)
+        except Exception:
+            rows = set()
+        _SERIAL_CACHE[key] = rows
+        if len(_SERIAL_CACHE) > 200:
+            _SERIAL_CACHE.pop(next(iter(_SERIAL_CACHE)))
+    return _SERIAL_CACHE[key]
+
+
+def column_value_search(sub, side, tb_amt, tol, sources=None):
+    """When a rule's own row does not give the amount, look THOROUGHLY at the column that belongs to the rule's currency on the
+    rule's sheet (EUR -> the EUR column of the by-currency sheet, IQD -> columns 3 and 4, foreign -> 5 and 6, Total -> the total
+    column, a maturity bucket -> its column):
+      1. a single cell equal to the amount (equal-and-opposite sign accepted, thousands rounding allowed);
+      2. else the SUM of the column's cells: all of them, all but the rows marked total, or all but the largest cell (a
+         total row that carries no 'Total' label) - a total that is not written anywhere is still found;
+      3. else nothing is claimed, but the closest value is reported so the difference can be looked into.
+    If the sheet has no column recognised as that currency, every column of the sheet that is not another currency's is searched.
+    Returns {"kind": "cell"|"sum"|"hint", "comps": [...], ...} or None."""
     if sub is None or not len(sub) or not side.get("sheet") or abs(tb_amt) < VALUE_SEARCH_MIN:
         return None
-    pool = sub[sub.sheet == side["sheet"]]
+    sheet_cells = sub[sub.sheet == side["sheet"]]
     ccy, letter, sg = side.get("currency"), side.get("column_letter"), side.get("sign", 1)
+    pool, fallback = sheet_cells, False
     if ccy:
-        pool = pool[pool.currency == ccy]
+        pool = sheet_cells[sheet_cells.currency == ccy]
+        if not len(pool):                       # no column was recognised as this currency: every column that is not another currency's
+            pool = sheet_cells[sheet_cells.currency.isin(["UNSPECIFIED", "TOTAL", "BUCKET"]) | sheet_cells.currency.isna()]
+            fallback = True
     if letter:
         pool = pool[pool.source_cell.astype(str).str.match(r"^%s\d+$" % re.escape(str(letter).upper()))]
+    text = side.get("match_text") or ""
+    where = side.get("currency") or "chosen"
+    if fallback and sources:
+        # no column of the sheet was recognised as this currency, so its cells were never extracted: read the sheet itself
+        fl = sub[sub.submission_file.map(lambda x: x in sources) & (sub.sheet == side["sheet"])]
+        files = sorted(set(fl.submission_file)) or sorted(sources)[:1]
+        sc = float(sheet_cells.scale.iloc[0]) if len(sheet_cells) and "scale" in sheet_cells.columns else 1.0
+        known = set(sheet_cells.source_cell)                       # cells that belong to a recognised (other) currency are not candidates
+        best = None
+        for fl_name in files:
+            for cell, rown, label, val in _raw_sheet_cells(sources[fl_name], side["sheet"]):
+                if cell in known:
+                    continue
+                v = val * sc
+                for flip in (1, -1):
+                    d = abs(v * sg * flip - tb_amt)
+                    if d <= max(tol, 0.5 * sc if sc > 1 else 0.0):
+                        key = (flip != 1, -text_similarity(text, label), d)
+                        if best is None or key < best[0]:
+                            best = (key, fl_name, cell, rown, label, v, flip)
+        if best:
+            _, fl_name, cell, rown, label, v, flip = best
+            comp = {"submission_file": fl_name, "sheet": side["sheet"], "row_number": rown, "source_cell": cell, "line_description": label,
+                    "currency": ccy, "amount": v, "multiplier": 1, "sign": sg * flip, "match_confidence": 1.0, "by_value": True}
+            return {"kind": "cell", "comps": [comp], "n": 1, "opposite": flip == -1, "fallback": True, "where": where}
     if not len(pool):
         return None
-    text = side.get("match_text") or ""
+    # 1. one cell
     cands = []
     for r in pool.itertuples(index=False):
         v = float(r.normalized_amount)
@@ -572,17 +661,131 @@ def column_value_search(sub, side, tb_amt, tol):
             d = abs(v * sg * flip - tb_amt)
             if d <= allow:
                 cands.append((flip != 1, -text_similarity(text, r.line_description), d, r, flip))
-    if not cands:
-        return None
-    cands.sort(key=lambda c: (c[0], c[1], c[2]))
-    _, _, _, r, flip = cands[0]
-    comp = {"submission_file": r.submission_file, "sheet": r.sheet, "row_number": int(r.row_number), "source_cell": r.source_cell,
-            "line_description": r.line_description, "currency": r.currency, "amount": float(r.normalized_amount), "multiplier": 1,
-            "sign": sg * flip, "match_confidence": 1.0, "by_value": True}
-    return comp, len(cands), flip == -1
+    if cands:
+        if re.search(r"\btotal\b", text, re.I):          # a total sits at the bottom of its column: of several equal cells take the lowest one
+            cands.sort(key=lambda c: (c[0], -int(c[3].row_number), c[2]))
+        else:
+            cands.sort(key=lambda c: (c[0], c[1], c[2]))
+        _, _, _, r, flip = cands[0]
+        return {"kind": "cell", "comps": [_cell_comp(r, sg * flip)], "n": len(cands), "opposite": flip == -1, "fallback": fallback, "where": where}
+    # 2. the sum of ONE column (IQD sits in columns 3 AND 4 but a subtotal is in one of them, never their sum)
+    rows = list(pool.itertuples(index=False))
+    groups = {}
+    for r in rows:
+        m = re.match(r"^([A-Z]+)\d+$", str(r.source_cell))
+        groups.setdefault((r.submission_file, m.group(1) if m else ""), []).append(r)
+    for (fname, letter), rws in sorted(groups.items()):
+        if len(rws) < 2:
+            continue
+        vals = [float(r.normalized_amount) for r in rws]
+        big = max(range(len(rws)), key=lambda i: abs(vals[i]))
+        serial = _serial_rows(sources, fname, side["sheet"])           # rows that carry a serial number in column A = the top-level lines
+        top = [i for i, r in enumerate(rws) if int(r.row_number) in serial]
+        variants = [("every cell of the column", list(range(len(rws)))),
+                    ("every cell except the rows marked total", [i for i, r in enumerate(rws) if not bool(getattr(r, "is_total", False))]),
+                    ("every cell except the largest one (probably the column's own total row)", [i for i in range(len(rws)) if i != big])]
+        if top:                                   # a hierarchical sheet: parents already hold the sum of their children
+            variants += [("the numbered top-level lines (serial no. in column A) except the largest one (the total line)", [i for i in top if i != big]),
+                         ("the numbered top-level lines (serial no. in column A)", top)]
+        seen = set()
+        for what, idx in variants:
+            key = tuple(idx)
+            if len(idx) < 2 or key in seen:
+                continue
+            seen.add(key)
+            sc_ = max(float(getattr(rws[i], "scale", 1.0) or 1.0) for i in idx)
+            allow = max(tol, 0.5 * sc_ * len(idx) if sc_ > 1 else 0.0)
+            for flip in (1, -1):
+                if abs(sum(vals[i] for i in idx) * sg * flip - tb_amt) <= allow:
+                    return {"kind": "sum", "comps": [_cell_comp(rws[i], sg * flip) for i in idx], "n": len(idx), "opposite": flip == -1,
+                            "what": ("column %s: " % letter if letter else "") + what, "fallback": fallback, "where": where}
+    # 3. nothing equals the amount: report the closest cell
+    near = min(pool.itertuples(index=False), key=lambda r: min(abs(float(r.normalized_amount) * sg - tb_amt), abs(-float(r.normalized_amount) * sg - tb_amt)))
+    v = float(near.normalized_amount) * sg
+    return {"kind": "hint", "comp": _cell_comp(near, sg), "diff": tb_amt - v, "fallback": fallback, "where": where, "n_cells": len(rows)}
 
 
-def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=False, col_search=True):
+def ob_depth_results(res, sub, sources, eng, ob_names, notes, start_n):
+    """DEPTH SEARCH of the off-balance pivots: EVERY value of Pivot 1 and of Pivot 2 is searched in every non-zero cell of the
+    off-balance workbook (the bucket pivot on the maturity sheet), with the same engine as the Depth Search page (thousands /
+    millions scale, equal-and-opposite sign, column-currency check). One result per distinct value, tagged "(depth search)"."""
+    from .depth_search import run_depth_search
+    from .outstanding_report import depth_specs
+    sheets = set(x for x in ob_names.values() if x)
+    labels = sorted(set(sub[sub.sheet.isin(sheets)].submission_file)) if (sub is not None and len(sub)) else []
+    labels = [x for x in labels if (sources or {}).get(x)]
+    if not labels:
+        notes.append("The off-balance depth search needs the original workbook of the off-balance file; it was skipped.")
+        return []
+    import pandas as pd
+    empty_tb = pd.DataFrame({"bs_mapping": [], "account": [], "account_desc": [], "tran_ccy": [], "adjusted_balance": []})
+    kws = ", ".join(["maturity, tenor, tenure"] + [x.lower() for x in (ob_names.get("maturity"),) if x])
+    ds = run_depth_search(empty_tb, [{"label": x, "path": sources[x]} for x in labels], dict((x, "offbalance") for x in labels),
+                          {"tol_abs": eng.tolerance_abs, "maturity_keywords": kws}, externals=depth_specs(res))
+    T = dict((t["id"], t) for t in ds["targets"])
+    members = defaultdict(list)
+    for t in ds["targets"]:
+        members[t["group"]].append(t)
+    from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
+    out = []
+    for entry in ds["files"]:
+        for w in entry.get("warnings") or []:
+            if w not in notes:
+                notes.append(w)
+    for t in ds["targets"]:
+        if t["group"] != t["id"] or not t.get("external"):
+            continue
+        if abs(t["amount"]) < 1e-9:
+            continue
+        hits = []
+        for entry in ds["files"]:
+            hits += [h for h in entry["hits"] if h["target_id"] == t["id"]]
+        hits.sort(key=lambda h: (h["currency_check"] == "CONFLICT", -float(h.get("name_similarity") or 0), abs(float(h["diff"]))))
+        same = [m["label"] for m in members[t["group"]] if m["id"] != t["id"]]
+        pivot_n = int(str(t["sheet"]).split()[-1])
+        col_letters, row = coordinate_from_string(t["cell"])
+        mark = ["obcell", pivot_n, row, column_index_from_string(col_letters)]
+        warn = []
+        if same:
+            warn.append("The same value is also: " + "; ".join(same[:4]) + (" ..." if len(same) > 4 else "") + ".")
+        comps, status, where = [], "NOT_FOUND", ""
+        if hits:
+            h = hits[0]
+            conflict = h["currency_check"] == "CONFLICT"
+            comps = [{"submission_file": h["file"], "sheet": h["sheet"], "row_number": int(h["row"]), "source_cell": h["cell"],
+                      "line_description": h["row_label"], "currency": h.get("column_currency") or t["currency"],
+                      "amount": float(h["value"]) * float(h["scale"]), "multiplier": 1, "sign": -1 if h["opposite_sign"] else 1,
+                      "match_confidence": 1.0, "depth": True}]
+            status = "REVIEW_REQUIRED" if conflict else ("MATCH" if abs(float(h["diff"])) <= 1e-6 else "MATCH_WITHIN_TOLERANCE")
+            where = "%s!%s" % (h["sheet"], h["cell"])
+            how = []
+            if float(h["scale"]) != 1.0:
+                how.append("the sheet is in x%s" % format(h["scale"], "g"))
+            if h["opposite_sign"]:
+                how.append("opposite sign")
+            warn.insert(0, "Found in row '%s', column '%s'%s." % (h["row_label"], h["column_header"], (" (" + ", ".join(how) + ")") if how else ""))
+            if conflict:
+                warn.insert(0, "The value is only found in a column of a different currency (%s), so it is not accepted as a match." % h.get("column_currency"))
+            if len(hits) > 1:
+                warn.append("%d other cell(s) hold the same value: %s." % (len(hits) - 1, ", ".join("%s!%s" % (x["sheet"], x["cell"]) for x in hits[1:4])))
+        sub_amt = float(sum(c["amount"] * c["sign"] for c in comps))
+        var = float(t["amount"]) - sub_amt
+        tbc = [{"account": t["label"], "account_desc": t["label"], "bs_mapping": OB_SOURCE, "currency": t["currency"], "amount": float(t["amount"]),
+                "sign": 1, "external": True}]
+        out.append({
+            "n": start_n + len(out), "label": "Off-balance %s (depth search)" % t["label"].replace("  |  ", " | "), "rule_type": "DEPTH_SEARCH",
+            "currency": t["currency"], "rule_text": "Pivot %d value searched in every non-zero cell of the off-balance sheets%s" % (
+                pivot_n, " (maturity sheet only)" if t.get("scope") == "maturity" else ""),
+            "tb_amount": float(t["amount"]), "sub_amount": sub_amt, "variance": var,
+            "variance_pct": (var / abs(t["amount"]) * 100.0) if abs(t["amount"]) > 1e-9 else None, "status": status,
+            "files": sorted(set(c["submission_file"] for c in comps)), "target_sheets": sorted(sheets), "where": where,
+            "tb_components": tbc, "components": comps, "warnings": warn, "tb_marks": [mark], "expanded": True, "derived": True, "ob": True,
+            "by_value": False, "depth": True, "resolved": {"tb_components": tbc, "components": comps}, "wildcard": False,
+            "n_tb": 1, "n_sub": len(comps), "color": ""})
+    return out
+
+
+def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=False, col_search=True, sources=None, ob_depth=True):
     templates = templates if templates is not None else eng.load_default_mapping()
     skipped = []
     concrete = expand_templates(templates, tb, sub, skipped)
@@ -623,21 +826,40 @@ def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=Fa
         notes = list(warnings)
         by_value = False
         if col_search and status in ("NOT_FOUND", "REVIEW_REQUIRED") and len(t.get("submission_side") or []) == 1:
-            hit = column_value_search(sub, t["submission_side"][0], tb_amt, tol)
-            if hit:
-                comp, n_hit, opposite = hit
+            hit = column_value_search(sub, t["submission_side"][0], tb_amt, tol, sources)
+            if hit and hit["kind"] == "hint":
+                c = hit["comp"]
+                notes.append("Searched the %s column(s) of '%s' (%d cells) for %s: no cell or column sum equals it. The closest value is %s in %s "
+                             "(row '%s'), %s away." % (hit["where"], c["sheet"], hit["n_cells"], format(tb_amt, ",.2f"), format(c["amount"] * c["sign"], ",.2f"),
+                                                       c["source_cell"], c["line_description"], format(abs(hit["diff"]), ",.2f")))
+            elif hit and hit["kind"] == "sum" and sbc:
+                # the sheet's own row exists and holds another number while the item rows add up to the pivot: the sheet is not
+                # consistent with itself, so it stays a variance - only the explanation is added
+                notes.append("The pivot amount %s equals the sum of %s (%d cells, %s) of the %s column(s) of '%s', but the sheet's own row (%s) holds %s "
+                             "(%s away): the total on the sheet does not add up." % (
+                                 format(tb_amt, ",.2f"), hit["what"], hit["n"], _cells_text(hit["comps"]), hit["where"], hit["comps"][0]["sheet"],
+                                 _cells_text(sbc), format(sub_amt, ",.2f"), format(abs(var), ",.2f")))
+            elif hit:
+                comps = hit["comps"]
                 was = ("its own row (%s) held %s" % (_cells_text(sbc), format(sub_amt, ",.2f"))) if sbc else "its own row was not found"
-                notes.insert(0, "Matched by value: searched every cell of the %s column(s) of '%s' and found %s in %s (row '%s')%s; %s." % (
-                    t["submission_side"][0].get("currency") or "chosen", comp["sheet"], format(tb_amt, ",.2f"), comp["source_cell"],
-                    comp["line_description"], (", %d cells hold this value, the closest row name was taken" % n_hit) if n_hit > 1 else "",
-                    was))
-                if opposite:
-                    notes.insert(1, "The cell holds the same amount with the opposite sign.")
-                sbc = [comp]
-                sub_amt = float(comp["amount"] * comp["sign"])
+                where_txt = "searched every cell of the %s column(s) of '%s'" % (hit["where"], comps[0]["sheet"])
+                if hit["fallback"]:
+                    where_txt = "no %s column was recognised on '%s', so every column that is not another currency's was searched" % (
+                        hit["where"], comps[0]["sheet"])
+                if hit["kind"] == "cell":
+                    found = "found %s in %s (row '%s')%s" % (format(tb_amt, ",.2f"), comps[0]["source_cell"], comps[0]["line_description"],
+                                                            (", %d cells hold this value, %s was taken" % (hit["n"], "the lowest one (a total sits at the bottom of its column)" if re.search(r"\btotal\b", t["submission_side"][0].get("match_text") or "", re.I) else "the closest row name")) if hit["n"] > 1 else "")
+                else:
+                    found = "no single cell holds it, but the sum of %s (%d cells, %s) is %s" % (
+                        hit["what"], hit["n"], _cells_text(comps), format(tb_amt, ",.2f"))
+                notes.insert(0, "Matched by value: %s and %s; %s." % (where_txt, found, was))
+                if hit["opposite"]:
+                    notes.insert(1, "The value has the opposite sign.")
+                sbc = comps
+                sub_amt = float(sum(c["amount"] * c["sign"] for c in sbc))
                 var = tb_amt - sub_amt
-                status = "MATCH" if abs(var) <= 1e-6 else ("MATCH_WITHIN_TOLERANCE" if abs(var) <= max(tol, 0.5 * float(
-                    scale_of.get((comp["submission_file"], comp["sheet"], comp["source_cell"]), 1.0))) else "REVIEW_REQUIRED")
+                allow_v = max(tol, 0.5 * sum(float(scale_of.get((c["submission_file"], c["sheet"], c["source_cell"]), 1.0)) for c in sbc))
+                status = "MATCH" if abs(var) <= 1e-6 else ("MATCH_WITHIN_TOLERANCE" if abs(var) <= allow_v else "REVIEW_REQUIRED")
                 resolved = dict(resolved)
                 resolved["components"] = sbc
                 by_value = True
@@ -654,6 +876,8 @@ def run_default_mapping(eng, tb, sub, templates=None, outstanding=None, ob_tb=Fa
             "wildcard": any(str(x.get("bs_mapping") or "").endswith("*") for x in (t.get("tb_side") or []) if x.get("level") == "group"),
             "n_tb": sum(1 for c in tbc if not c.get("placeholder")), "n_sub": sum(1 for c in sbc if not c.get("placeholder")),
             "color": ""})
+    if ob_depth and outstanding is not None and ob_pivots:
+        results += ob_depth_results(outstanding, sub, sources, eng, _ob_sheet_names(sub), ob_notes, len(results) + 1)
     palette_i = 0
     for r in results:
         if r["n_sub"]:
@@ -689,10 +913,15 @@ def group_coverage(tb, results):
 
 
 def summarise(results):
-    s = {"rules": len(results), "MATCH": 0, "MATCH_WITHIN_TOLERANCE": 0, "REVIEW_REQUIRED": 0, "NOT_FOUND": 0}
-    for r in results:
+    """Counts of the rules; the off-balance depth-search values are counted apart (they are searches, not rules)."""
+    rules = [r for r in results if not r.get("depth")]
+    s = {"rules": len(rules), "MATCH": 0, "MATCH_WITHIN_TOLERANCE": 0, "REVIEW_REQUIRED": 0, "NOT_FOUND": 0}
+    for r in rules:
         s[r["status"]] += 1
-    s["abs_variance"] = float(sum(abs(r["variance"]) for r in results if r["status"] in ("REVIEW_REQUIRED", "MATCH_WITHIN_TOLERANCE")))
+    s["abs_variance"] = float(sum(abs(r["variance"]) for r in rules if r["status"] in ("REVIEW_REQUIRED", "MATCH_WITHIN_TOLERANCE")))
+    dp = [r for r in results if r.get("depth")]
+    s["depth"] = {"values": len(dp), "found": sum(1 for r in dp if r["status"] in ("MATCH", "MATCH_WITHIN_TOLERANCE")),
+                  "review": sum(1 for r in dp if r["status"] == "REVIEW_REQUIRED"), "not_found": sum(1 for r in dp if r["status"] == "NOT_FOUND")}
     return s
 
 
@@ -700,9 +929,9 @@ def public_results(run):
     """JSON for the web page (no heavy internals)."""
     out = []
     for r in run["results"]:
-        out.append({k: r[k] for k in ("n", "label", "rule_type", "currency", "rule_text", "tb_amount", "sub_amount", "variance",
+        out.append({k: r.get(k, False if k in ("depth", "by_value", "derived", "expanded") else None) for k in ("n", "label", "rule_type", "currency", "rule_text", "tb_amount", "sub_amount", "variance",
                                       "variance_pct", "status", "files", "target_sheets", "where", "warnings", "color",
-                                      "n_tb", "n_sub", "expanded", "derived", "by_value")})
+                                      "n_tb", "n_sub", "expanded", "derived", "by_value", "depth")})
     return out
 
 
@@ -870,7 +1099,7 @@ def write_default_workbook(path_in, path_out, label, tb, run):
 def _write_ob_pivots(wb, run, mine, bold, grey):
     """OB Pivot 1 / OB Pivot 2 (the Outstanding Report) with the cells the off-balance rules used coloured."""
     pv = run.get("ob_pivots")
-    if not pv or not any(m[0] == "ob" for r in mine for m in r["tb_marks"]):
+    if not pv or not any(m[0] in ("ob", "obcell") for r in mine for m in r["tb_marks"]):
         return
     sheets = {}
     for n in (1, 2):
@@ -891,6 +1120,9 @@ def _write_ob_pivots(wb, run, mine, bold, grey):
         if not r["color"]:
             continue
         for mk in r["tb_marks"]:
+            if mk[0] == "obcell":                     # a single cell of an OB pivot (depth search)
+                sheets[mk[1]][0].cell(row=mk[2], column=mk[3]).fill = _fill(r["color"])
+                continue
             if mk[0] != "ob":
                 continue
             _, n, kind, name, colnames = mk[:5]
@@ -938,6 +1170,11 @@ def build_pdf(run, files=None, tb_name="", suggestions=None, approved=None, manu
     pdf.table(["Rules applied", "Match", "Match (within tolerance)", "Variance - review", "Not found", "Total absolute variance"],
               [[s["rules"], s["MATCH"], s["MATCH_WITHIN_TOLERANCE"], s["REVIEW_REQUIRED"], s["NOT_FOUND"], _money(s["abs_variance"])]],
               [1, 1, 1.4, 1.2, 1, 1.6], size=9, aligns=["r"] * 6)
+    dp = s.get("depth") or {}
+    if dp.get("values"):
+        pdf.paragraph("Off-balance depth search: %d value(s) of Pivot 1 and Pivot 2 were searched in every non-zero cell of the off-balance sheets - "
+                      "%d found, %d found only in a column of another currency, %d not found. They are listed in section 2 with the tag (depth search)." % (
+                          dp["values"], dp["found"], dp["review"], dp["not_found"]), 8.5)
     if files:
         rows = []
         for f in files:
@@ -973,7 +1210,7 @@ def build_pdf(run, files=None, tb_name="", suggestions=None, approved=None, manu
                   [2, 1.6, 1.8, 1.6, 4], size=6.6, aligns=["l", "r", "r", "r", "l"],
                   fills=[{} if g["covered"] else {4: STATUS_RGB["NOT_FOUND"]} for g in groups])
     pdf.heading("4. Rule detail - Trial Balance side and submission side", 12)
-    for r in results:
+    for r in [x for x in results if not x.get("depth")]:
         pdf.ensure(70)
         pdf.paragraph("#%d  %s" % (r["n"], r["label"]), 9.5, True, gap=1)
         pdf.paragraph("Status: %s   |   TB %s   vs   submission %s   =   variance %s%s" % (
